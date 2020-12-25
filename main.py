@@ -1,239 +1,613 @@
-import torch
-from torch import nn, optim
-from torch.utils import data
-from torchvision import transforms
-from torchvision.datasets import ImageFolder
-from torchvision.utils import make_grid
-from tensorboardX import SummaryWriter
-
-from PIL import Image
-from tqdm import tqdm
-from colorama import Fore
-
+#######################################################################################################################
+#
+# BSD 3-Clause License
+#
+# Copyright (c) 2018, NVIDIA CORPORATION. All rights reserved.
+# Copyright (c) 2017, Soumith Chintala. All rights reserved.
+# ********************************************************************************************************************
+#
+#
+# The code in this file is adapted from: https://github.com/pytorch/examples/tree/master/imagenet/main.py
+#
+# Main Difference from the original file: add the networks using partial convolution based padding
+#
+# Network options using zero padding:               vgg16_bn, vgg19_bn, resnet50, resnet101, resnet152, ...
+# Network options using partial conv based padding: pdvgg16_bn, pdvgg19_bn, pdresnet50, pdresnet101, pdresnet152, ...
+#
+# Contact: Guilin Liu (guilinl@nvidia.com)
+#
+#######################################################################################################################
+import argparse
 import os
+import random
+import shutil
+import time
+import warnings
+
+import torch
+import torch.nn as nn
+import torch.nn.parallel
+import torch.backends.cudnn as cudnn
+import torch.distributed as dist
+import torch.optim
+import torch.utils.data
+from torch.utils.data.dataset import TensorDataset
+import torch.utils.data.distributed
+import torchvision.transforms as transforms
+import torchvision.datasets as datasets
+
+# import torchvision.models as models
+import torchvision.models as models_baseline  # networks with zero padding
+import models as models_partial  # partial conv based padding
+
 import numpy as np
 
-from utils import weights_init, unnormalize_batch
-from datasets import FashionGen, FashionAI, DeepFashion, DeepFashion2, CelebAHQ
-from models import Net, PConvNet, Discriminator, VGG16
-from losses import CustomLoss
+class MyDataset(torch.utils.data.Dataset):
+    def __init__(self, data, targets, transform=None):
+        self.data = data
+        self.targets = torch.FloatTensor(targets)
+        self.transform = transform
 
-###########################
-####     CONSTANTS     ####
-###########################
-NUM_EPOCHS = 21
-BATCH_SIZE = 16
-DATASET = "DeepFashion2"
-DATA_FOLDER = os.path.join("./data", DATASET)
-MODE = "ablation"
-MASK_FORM = "free"  # "free"
-MULTI_GPU = True
-DEVICE_ID = 1
-DEVICE = "cuda" if MULTI_GPU else "cuda:{}".format(DEVICE_ID)
-MEAN = np.array([0.485, 0.456, 0.406])
-STD = np.array([0.229, 0.224, 0.225])
+    def __getitem__(self, index):
+        x = self.data[index]
+        y = self.targets[index]
 
-###########################
-#####     DATASET     #####
-###########################
-if DATASET == "FashionGen":
-    train_dataset = FashionGen(filename=os.path.join(DATA_FOLDER, "fashiongen_256_256_train.h5"), mask_form=MASK_FORM)
-    val_dataset = FashionGen(filename=os.path.join(DATA_FOLDER, "fashiongen_256_256_validation.h5"), mask_form=MASK_FORM)
-else:
-    raise NotImplementedError("Unknown dataset.")
+        if self.transform:
+            x = self.transform(x)
 
-print("Sample size in training: {}".format(len(train_dataset)))
+        return x, y
 
-train_img_loader = data.DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=0)
-val_img_loader = data.DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=0)
+    def __len__(self):
+        return len(self.data)
 
 
-###########################
-####     DATA PREP     ####
-###########################
-# Data Manipulation, To increase variety of data and reduce overfitting
-mask_transform = transforms.Compose([transforms.RandomHorizontalFlip(p=0.5),
-                                        transforms.RandomVerticalFlip(p=0.5),
-                                        transforms.Resize(256),
-                                        transforms.ToTensor(), ])
+model_baseline_names = sorted(
+    name
+    for name in models_baseline.__dict__
+    if name.islower()
+    and not name.startswith("__")
+    and callable(models_baseline.__dict__[name])
+)
 
-m_train = ImageFolder(root="./data/qd_imd_big/train/", transform=mask_transform) #Show Training image directory
-m_val = ImageFolder(root="./data/qd_imd_big/test/", transform=mask_transform) #Show Validation image directory
+model_partial_names = sorted(
+    name
+    for name in models_partial.__dict__
+    if name.islower()
+    and not name.startswith("__")
+    and callable(models_partial.__dict__[name])
+)
 
-print("Mask size in training: {}".format(len(m_train)))
-
-train_mask_loader = data.DataLoader(m_train, batch_size=BATCH_SIZE, shuffle=True, num_workers=0) #Import Training Data
-val_mask_loader = data.DataLoader(m_val, batch_size=BATCH_SIZE, shuffle=False, num_workers=0) #Import Validation Data
-
-###########################
-######     MODEL     ######
-###########################
-device = torch.device(DEVICE if torch.cuda.is_available() else "cpu")
-
-d_net = Discriminator()
-refine_net = Net()
-
-if MODE != "ablation":
-    vgg = VGG16(requires_grad=False)
-    vgg.to(device)
-
-if torch.cuda.device_count() > 1 and MULTI_GPU:
-    print("Using {} GPUs...".format(torch.cuda.device_count()))
-    d_net = nn.DataParallel(d_net)
-    refine_net = nn.DataParallel(refine_net)
-else:
-    print("GPU ID: {}".format(device))
-
-d_net = d_net.to(device)
-refine_net = refine_net.to(device)
-
-if MODE == "train":
-    refine_net.apply(weights_init)
-
-d_loss_fn = nn.BCELoss()
-d_loss_fn = d_loss_fn.to(device)
-refine_loss_fn = CustomLoss()
-refine_loss_fn = refine_loss_fn.to(device)
-
-lr, r_lr, d_lr = 0.0004, 0.0004, 0.0004
-d_optimizer = optim.Adam(d_net.parameters(), lr=d_lr, betas=(0.9, 0.999))
-r_optimizer = optim.Adam(refine_net.parameters(), lr=r_lr, betas=(0.5, 0.999))
-
-d_scheduler = optim.lr_scheduler.ExponentialLR(d_optimizer, gamma=0.9)
-r_scheduler = optim.lr_scheduler.ExponentialLR(r_optimizer, gamma=0.9)
-
-if MODE != "ablation":
-    writer = SummaryWriter()
+model_names = model_baseline_names + model_partial_names
 
 
-def train(epoch, img_loader, mask_loader=None):
-    for batch_idx, (y_train, _) in tqdm(enumerate(img_loader), ncols=50, desc="Training", total=len(train_dataset) // BATCH_SIZE,
-                                                  bar_format="{l_bar}%s{bar}%s{r_bar}" % (Fore.GREEN, Fore.RESET)):
-        if MASK_FORM == "free":
-            x_mask, _ = next(iter(mask_loader))
-            if x_mask.size(0) != y_train.size(0):
-                x_mask = x_mask[:y_train.size(0)]
+parser = argparse.ArgumentParser(description="PyTorch ImageNet Training")
+# parser.add_argument('data', metavar='DIR',
+#                     help='path to dataset')
+#parser.add_argument("--data_train", metavar="DIRTRAIN", help="path to training dataset")
 
-            x_train = x_mask * y_train + (1.0 - x_mask) * 0.5
+#parser.add_argument("--data_val", metavar="DIRVAL", help="path to validation dataset")
 
-        num_step = epoch * len(img_loader) + batch_idx
+parser.add_argument(
+    "--arch",
+    "-a",
+    metavar="ARCH",
+    default="resnet50",
+    choices=model_names,
+    help="model architecture: " + " | ".join(model_names) + " (default: resnet50)",
+)
+parser.add_argument(
+    "-j",
+    "--workers",
+    default=4,
+    type=int,
+    metavar="N",
+    help="number of data loading workers (default: 4)",
+)
+parser.add_argument(
+    "--epochs", default=100, type=int, metavar="N", help="number of total epochs to run"
+)
+# parser.add_argument('--epochs', default=90, type=int, metavar='N',
+#                     help='number of total epochs to run')
+parser.add_argument(
+    "--start-epoch",
+    default=0,
+    type=int,
+    metavar="N",
+    help="manual epoch number (useful on restarts)",
+)
+# parser.add_argument('-b', '--batch-size', default=256, type=int,
+#                     metavar='N', help='mini-batch size (default: 256)')
+# use the batch size 256 or 192 depending on the memeory
+parser.add_argument(
+    "-b",
+    "--batch-size",
+    default=192,
+    type=int,
+    metavar="N",
+    help="mini-batch size (default: 192)",
+)
+parser.add_argument(
+    "--lr",
+    "--learning-rate",
+    default=0.1,
+    type=float,
+    metavar="LR",
+    help="initial learning rate",
+)
+parser.add_argument("--momentum", default=0.9, type=float, metavar="M", help="momentum")
+parser.add_argument(
+    "--weight-decay",
+    "--wd",
+    default=1e-4,
+    type=float,
+    metavar="W",
+    help="weight decay (default: 1e-4)",
+)
+parser.add_argument(
+    "--print-freq",
+    "-p",
+    default=10,
+    type=int,
+    metavar="N",
+    help="print frequency (default: 10)",
+)
+parser.add_argument(
+    "--resume",
+    default="",
+    type=str,
+    metavar="PATH",
+    help="path to latest checkpoint (default: none)",
+)
+parser.add_argument(
+    "-e",
+    "--evaluate",
+    dest="evaluate",
+    action="store_true",
+    help="evaluate model on validation set",
+)
+parser.add_argument(
+    "--pretrained", dest="pretrained", action="store_true", help="use pre-trained model"
+)
+parser.add_argument(
+    "--world-size", default=1, type=int, help="number of distributed processes"
+)
+parser.add_argument(
+    "--dist-url",
+    default="tcp://224.66.41.62:23456",
+    type=str,
+    help="url used to set up distributed training",
+)
+parser.add_argument(
+    "--dist-backend", default="gloo", type=str, help="distributed backend"
+)
+parser.add_argument(
+    "--seed", default=None, type=int, help="seed for initializing training. "
+)
+parser.add_argument("--gpu", default=None, type=int, help="GPU id to use.")
 
-        x_mask = x_mask.float().to(device)
-        y_train = unnormalize_batch(y_train, MEAN, STD).float().to(device)
-        x_train = x_train.float().to(device)
+parser.add_argument("--prefix", default="", type=str)
+parser.add_argument("--ckptdirprefix", default="", type=str)
 
-        writer.add_scalar("LR/learning_rate", r_scheduler.get_lr(), num_step)
+best_prec1 = 0
 
-        refine_net.zero_grad()
-        r_output = refine_net(x_train, x_mask)
-        d_output = d_net(r_output.detach()).view(-1)
-        r_composite = x_mask * y_train + (1.0 - x_mask) * r_output
 
-        vgg_features_gt = vgg(y_train)
-        vgg_features_composite = vgg(r_composite)
-        vgg_features_output = vgg(r_output)
+def main():
+    global args, best_prec1
+    args = parser.parse_args()
 
-        r_total_loss, r_pixel_loss, r_perceptual_loss, \
-            adversarial_loss, r_tv_loss = refine_loss_fn(y_train, r_output, r_composite, d_output,
-                                                         vgg_features_gt, vgg_features_output, vgg_features_composite)
+    checkpoint_dir = (
+        args.ckptdirprefix + "checkpoint_" + args.arch + "_" + args.prefix + "/"
+    )
+    if not os.path.exists(checkpoint_dir):
+        os.makedirs(checkpoint_dir)
+    args.logger_fname = os.path.join(checkpoint_dir, "loss.txt")
 
-        writer.add_scalar("Refine_G/on_step_total_loss", r_total_loss.item(), num_step)
-        writer.add_scalar("Refine_G/on_step_pixel_loss", r_pixel_loss.item(), num_step)
-        writer.add_scalar("Refine_G/on_step_perceptual_loss", r_perceptual_loss.item(), num_step)
-        writer.add_scalar("Refine_G/on_step_adversarial_loss", adversarial_loss.item(), num_step)
-        writer.add_scalar("Refine_G/on_step_tv_loss", r_tv_loss.item(), num_step)
+    with open(args.logger_fname, "a") as log_file:
+        now = time.strftime("%c")
+        log_file.write("================ Training Loss (%s) ================\n" % now)
+        log_file.write("world size: %d\n" % args.world_size)
 
-        r_total_loss.backward()
-        r_optimizer.step()
+    if args.seed is not None:
+        random.seed(args.seed)
+        torch.manual_seed(args.seed)
+        cudnn.deterministic = True
+        warnings.warn(
+            "You have chosen to seed training. "
+            "This will turn on the CUDNN deterministic setting, "
+            "which can slow down your training considerably! "
+            "You may see unexpected behavior when restarting "
+            "from checkpoints."
+        )
 
-        d_net.zero_grad()
-        d_real_output = d_net(y_train).view(-1)
-        d_fake_output = d_output.detach()
+    if args.gpu is not None:
+        warnings.warn(
+            "You have chosen a specific GPU. This will completely "
+            "disable data parallelism."
+        )
 
-        if torch.rand(1) > 0.1:
-            d_real_loss = d_loss_fn(d_real_output, torch.FloatTensor(d_real_output.size(0)).uniform_(0.0, 0.3).to(device))
-            d_fake_loss = d_loss_fn(d_fake_output, torch.FloatTensor(d_fake_output.size(0)).uniform_(0.7, 1.2).to(device))
+    args.distributed = args.world_size > 1
+
+    if args.distributed:
+        dist.init_process_group(
+            backend=args.dist_backend,
+            init_method=args.dist_url,
+            world_size=args.world_size,
+        )
+
+    # create model
+    if args.pretrained:
+        print("=> using pre-trained model '{}'".format(args.arch))
+        if args.arch in models_baseline.__dict__:
+            model = models_baseline.__dict__[args.arch](pretrained=True)
         else:
-            d_real_loss = d_loss_fn(d_real_output, torch.FloatTensor(d_fake_output.size(0)).uniform_(0.7, 1.2).to(device))
-            d_fake_loss = d_loss_fn(d_fake_output, torch.FloatTensor(d_real_output.size(0)).uniform_(0.0, 0.3).to(device))
-
-        writer.add_scalar("Discriminator/on_step_real_loss", d_real_loss.mean().item(), num_step)
-        writer.add_scalar("Discriminator/on_step_fake_loss", d_fake_loss.mean().item(), num_step)
-
-        d_loss = d_real_loss + d_fake_loss
-
-        d_loss.backward()
-        d_optimizer.step()
-
-        if batch_idx % 1000 == 0:
-            x_grid = make_grid(unnormalize_batch(x_train[:6], MEAN, STD), nrow=6, padding=2)
-            y_grid = make_grid(y_train[:6], nrow=6, padding=2)
-            r_output_grid = make_grid(r_output[:6], nrow=6, padding=2)
-            r_composite_grid = make_grid(r_composite[:6], nrow=6, padding=2)
-
-            writer.add_image("x_train/epoch_{}".format(epoch), x_grid, num_step)
-            writer.add_image("org/epoch_{}".format(epoch), y_grid, num_step)
-            writer.add_image("refine_output/epoch_{}".format(epoch), r_output_grid, num_step)
-            writer.add_image("refine_composite/epoch_{}".format(epoch), r_composite_grid, num_step)
-
-            print("Step:{}  ".format(num_step),
-                  "Epoch:{}".format(epoch),
-                  "[{}/{} ".format(batch_idx * len(x_train), len(train_img_loader.dataset)),
-                  "({}%)]  ".format(int(100 * batch_idx / float(len(train_img_loader))))
-                  )
-
-
-def ablation(path):
-    normalizer = transforms.Normalize(MEAN, STD)
-    tensorizer = transforms.ToTensor()
-    pillowize = transforms.ToPILImage()
-    resizer = transforms.Resize((256, 256))
-    refine_net.eval()
-    with torch.no_grad():
-        imgs, masks, idxs = list(), list(), list()
-        for i, fname in enumerate(os.listdir(os.path.join(path, "img"))):
-            if os.path.isfile(os.path.join(path, "masked", "mask_" + fname)):
-                idxs.append(i)
-                imgs.append(normalizer(tensorizer(resizer(Image.open(os.path.join(path, "img", fname))))))
-                m = tensorizer(resizer(Image.open(os.path.join(path, "masked", "mask_" + fname))))
-                masks.append(m)
-
-        new_masks = list()
-        for ma in masks:
-            if ma.size(0) == 1:
-                ma = torch.cat([ma] * 3)
-            new_masks.append(ma)
-        masks = new_masks
-
-        imgs = torch.stack(imgs).float().to(device)
-        masks = torch.stack(masks).float().to(device)
-
-        x_train = masks * imgs + (1.0 - masks) * 0.5
-        output = refine_net(x_train, masks)
-        output = masks * unnormalize_batch(imgs, MEAN, STD) + (1.0 - masks) * output
-        fnames = os.listdir(os.path.join(path, "img"))
-        x_train = unnormalize_batch(x_train, MEAN, STD)
-        for out, x, idx in zip(output, x_train, idxs):
-            pillowize(x.squeeze().cpu()).save(os.path.join(path, "train", "train_" + fnames[idx]))
-            pillowize(out.squeeze().cpu()).save(os.path.join(path, "res", "res_" + fnames[idx]))
-
-
-if __name__ == '__main__':
-    if MODE == "train":
-        if not os.path.exists("./weights_{}_{}".format(DATASET, MASK_FORM)):
-            os.mkdir("./weights_{}_{}".format(DATASET, MASK_FORM))
-
-        for e in range(NUM_EPOCHS):
-            if MASK_FORM == "free":
-                train(e, train_img_loader, train_mask_loader)
-            else:
-                train(e, train_img_loader)
-            r_scheduler.step(e)
-            d_scheduler.step(e)
-            torch.save(refine_net.state_dict(), "./weights_{}_{}/weights_net_epoch_{}.pth".format(DATASET, MASK_FORM, e))
-        writer.close()
+            model = models_partial.__dict__[args.arch](pretrained=True)
+        # model = models.__dict__[args.arch](pretrained=True)
     else:
-        PATH = "./weights/weights_{}_{}/weights_net_epoch_{}.pth".format(DATASET, MASK_FORM, NUM_EPOCHS)
-        refine_net.load_state_dict(torch.load(PATH))
-        ABLATION_DATA_PATH = "./data/ablation"
-        ablation(ABLATION_DATA_PATH)
+        print("=> creating model '{}'".format(args.arch))
+        if args.arch in models_baseline.__dict__:
+            model = models_baseline.__dict__[args.arch]()
+        else:
+            model = models_partial.__dict__[args.arch]()
+        # model = models.__dict__[args.arch]()
+
+    # logging
+    with open(args.logger_fname, "a") as log_file:
+        log_file.write("model created\n")
+
+    if args.gpu is not None:
+        model = model.cuda(args.gpu)
+    elif args.distributed:
+        model.cuda()
+        model = torch.nn.parallel.DistributedDataParallel(model)
+    else:
+        # if args.arch.startswith('alexnet') or args.arch.startswith('vgg'):
+        if args.arch.startswith("alexnet") or "vgg" in args.arch:
+            model.features = torch.nn.DataParallel(model.features)
+            model.cuda()
+        else:
+            model = torch.nn.DataParallel(model).cuda()
+
+    # define loss function (criterion) and optimizer
+    criterion = nn.CrossEntropyLoss().cuda(args.gpu)
+
+    # [p for p in model.parameters() if p.requires_grad]
+    optimizer = torch.optim.SGD(
+        [p for p in model.parameters() if p.requires_grad],
+        args.lr,
+        momentum=args.momentum,
+        weight_decay=args.weight_decay,
+    )
+
+    # optionally resume from a checkpoint
+    if args.resume:
+        if os.path.isfile(args.resume):
+            print("=> loading checkpoint '{}'".format(args.resume))
+            checkpoint = torch.load(args.resume)
+            args.start_epoch = checkpoint["epoch"]
+            best_prec1 = checkpoint["best_prec1"]
+
+            model.load_state_dict(checkpoint["state_dict"])
+
+            optimizer.load_state_dict(checkpoint["optimizer"])
+            print(
+                "=> loaded checkpoint '{}' (epoch {})".format(
+                    args.resume, checkpoint["epoch"]
+                )
+            )
+        else:
+            print("=> no checkpoint found at '{}'".format(args.resume))
+            assert False
+
+    cudnn.benchmark = True
+
+    # Data loading code
+    # traindir = os.path.join(args.data, 'train')
+    # valdir = os.path.join(args.data, 'val')
+    from dataset import Dataset
+
+    DS = Dataset(randomize=False)
+    DS.prepare()
+    TX = []
+    TY = []
+    for _ in range(16):
+        x, y = DS.get()
+        TX.append(x)
+        TY.append(y)
+
+    VX = TX
+    VY = TY
+    # traindir = args.data_train #os.path.join(args.data, 'train')
+    # valdir = args.data_val  #os.path.join(args.data, 'val')
+    normalize = transforms.Normalize(
+        mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]
+    )
+
+    # train_dataset = datasets.ImageFolder(
+    #     traindir,
+    #     transforms.Compose([
+    #         transforms.RandomHorizontalFlip(),
+    #         transforms.ToTensor(),
+    #         normalize,
+    #     ]))
+    train_sampler = None
+
+    train_loader = torch.utils.data.DataLoader(
+        MyDataset(torch.from_numpy(np.array(TX)), torch.from_numpy(np.array(TY))),
+        batch_size=args.batch_size,
+        shuffle=(train_sampler is None),
+        num_workers=args.workers,
+        pin_memory=True,
+        sampler=train_sampler,
+    )
+
+    val_loader = torch.utils.data.DataLoader(
+        MyDataset(torch.from_numpy(np.array(VX)), torch.from_numpy(np.array(VY))),
+        batch_size=args.batch_size,
+        shuffle=False,
+        num_workers=args.workers,
+        pin_memory=True,
+    )
+
+    # logging
+    with open(args.logger_fname, "a") as log_file:
+        log_file.write("training/val dataset created\n")
+
+    if args.evaluate:
+        validate(val_loader, model, criterion)
+        return
+
+    # logging
+    with open(args.logger_fname, "a") as log_file:
+        log_file.write("started training\n")
+
+    for epoch in range(args.start_epoch, args.epochs):
+        if args.distributed:
+            train_sampler.set_epoch(epoch)
+        adjust_learning_rate(optimizer, epoch)
+
+        # train for one epoch
+        train(train_loader, model, criterion, optimizer, epoch)
+
+        # evaluate on validation set
+        prec1 = validate(val_loader, model, criterion)
+
+        # remember best prec@1 and save checkpoint
+        is_best = prec1 > best_prec1
+        best_prec1 = max(prec1, best_prec1)
+        save_checkpoint(
+            {
+                "epoch": epoch + 1,
+                "arch": args.arch,
+                "state_dict": model.state_dict(),
+                "best_prec1": best_prec1,
+                "optimizer": optimizer.state_dict(),
+            },
+            is_best,
+            foldername=checkpoint_dir,
+            filename="checkpoint.pth.tar",
+        )
+
+        if epoch >= 94:
+            save_checkpoint(
+                {
+                    "epoch": epoch + 1,
+                    "arch": args.arch,
+                    "state_dict": model.state_dict(),
+                    "best_prec1": best_prec1,
+                    "optimizer": optimizer.state_dict(),
+                },
+                False,
+                foldername=checkpoint_dir,
+                filename="epoch_" + str(epoch) + "_checkpoint.pth.tar",
+            )
+
+
+def train(train_loader, model, criterion, optimizer, epoch):
+    batch_time = AverageMeter()
+    data_time = AverageMeter()
+    losses = AverageMeter()
+    top1 = AverageMeter()
+    top5 = AverageMeter()
+
+    # switch to train mode
+    model.train()
+
+    end = time.time()
+    for i, (input, target) in enumerate(train_loader):
+        # measure data loading time
+        data_time.update(time.time() - end)
+
+        if args.gpu is not None:
+            input = input.cuda(args.gpu, non_blocking=True)
+        target = target.cuda(args.gpu, non_blocking=True)
+
+        # compute output
+        output = model(input)
+        loss = criterion(output, target)
+
+        # measure accuracy and record loss
+        prec1, prec5 = accuracy(output, target, topk=(1, 5))
+        losses.update(loss.item(), input.size(0))
+        top1.update(prec1[0], input.size(0))
+        top5.update(prec5[0], input.size(0))
+
+        # compute gradient and do SGD step
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+
+        # measure elapsed time
+        batch_time.update(time.time() - end)
+        end = time.time()
+
+        if i % args.print_freq == 0:
+            print(
+                "Epoch: [{0}][{1}/{2}]\t"
+                "Time {batch_time.val:.3f} ({batch_time.avg:.3f})\t"
+                "Data {data_time.val:.3f} ({data_time.avg:.3f})\t"
+                "Loss {loss.val:.4f} ({loss.avg:.4f})\t"
+                "Prec@1 {top1.val:.3f} ({top1.avg:.3f})\t"
+                "Prec@5 {top5.val:.3f} ({top5.avg:.3f})\n".format(
+                    epoch,
+                    i,
+                    len(train_loader),
+                    batch_time=batch_time,
+                    data_time=data_time,
+                    loss=losses,
+                    top1=top1,
+                    top5=top5,
+                )
+            )
+
+            with open(args.logger_fname, "a") as log_file:
+                log_file.write(
+                    "Epoch: [{0}][{1}/{2}]\t"
+                    "Time {batch_time.val:.3f} ({batch_time.avg:.3f})\t"
+                    "Data {data_time.val:.3f} ({data_time.avg:.3f})\t"
+                    "Loss {loss.val:.4f} ({loss.avg:.4f})\t"
+                    "Prec@1 {top1.val:.3f} ({top1.avg:.3f})\t"
+                    "Prec@5 {top5.val:.3f} ({top5.avg:.3f})\n".format(
+                        epoch,
+                        i,
+                        len(train_loader),
+                        batch_time=batch_time,
+                        data_time=data_time,
+                        loss=losses,
+                        top1=top1,
+                        top5=top5,
+                    )
+                )
+
+
+def validate(val_loader, model, criterion):
+    batch_time = AverageMeter()
+    losses = AverageMeter()
+    top1 = AverageMeter()
+    top5 = AverageMeter()
+
+    # switch to evaluate mode
+    model.eval()
+
+    with torch.no_grad():
+        end = time.time()
+        for i, (input, target) in enumerate(val_loader):
+            if args.gpu is not None:
+                input = input.cuda(args.gpu, non_blocking=True)
+            target = target.cuda(args.gpu, non_blocking=True)
+
+            # compute output
+            output = model(input)
+            loss = criterion(output, target)
+
+            # measure accuracy and record loss
+            prec1, prec5 = accuracy(output, target, topk=(1, 5))
+            losses.update(loss.item(), input.size(0))
+            top1.update(prec1[0], input.size(0))
+            top5.update(prec5[0], input.size(0))
+
+            # measure elapsed time
+            batch_time.update(time.time() - end)
+            end = time.time()
+
+            if i % args.print_freq == 0:
+                print(
+                    "Test: [{0}/{1}]\t"
+                    "Time {batch_time.val:.3f} ({batch_time.avg:.3f})\t"
+                    "Loss {loss.val:.4f} ({loss.avg:.4f})\t"
+                    "Prec@1 {top1.val:.3f} ({top1.avg:.3f})\t"
+                    "Prec@5 {top5.val:.3f} ({top5.avg:.3f})".format(
+                        i,
+                        len(val_loader),
+                        batch_time=batch_time,
+                        loss=losses,
+                        top1=top1,
+                        top5=top5,
+                    )
+                )
+
+                with open(args.logger_fname, "a") as log_file:
+                    log_file.write(
+                        "Test: [{0}/{1}]\t"
+                        "Time {batch_time.val:.3f} ({batch_time.avg:.3f})\t"
+                        "Loss {loss.val:.4f} ({loss.avg:.4f})\t"
+                        "Prec@1 {top1.val:.3f} ({top1.avg:.3f})\t"
+                        "Prec@5 {top5.val:.3f} ({top5.avg:.3f})\n".format(
+                            i,
+                            len(val_loader),
+                            batch_time=batch_time,
+                            loss=losses,
+                            top1=top1,
+                            top5=top5,
+                        )
+                    )
+
+        print(
+            " * Prec@1 {top1.avg:.3f} Prec@5 {top5.avg:.3f}".format(
+                top1=top1, top5=top5
+            )
+        )
+
+        with open(args.logger_fname, "a") as final_log_file:
+            final_log_file.write(
+                " * Prec@1 {top1.avg:.3f} Prec@5 {top5.avg:.3f}".format(
+                    top1=top1, top5=top5
+                )
+            )
+
+    return top1.avg
+
+
+def save_checkpoint(state, is_best, foldername="", filename="checkpoint.pth.tar"):
+    torch.save(state, os.path.join(foldername, filename))
+    if is_best:
+        shutil.copyfile(
+            os.path.join(foldername, filename),
+            os.path.join(foldername, "model_best.pth.tar"),
+        )
+
+
+class AverageMeter(object):
+    """Computes and stores the average and current value"""
+
+    def __init__(self):
+        self.reset()
+
+    def reset(self):
+        self.val = 0
+        self.avg = 0
+        self.sum = 0
+        self.count = 0
+
+    def update(self, val, n=1):
+        self.val = val
+        self.sum += val * n
+        self.count += n
+        self.avg = self.sum / self.count
+
+
+def adjust_learning_rate(optimizer, epoch):
+    """Sets the learning rate to the initial LR decayed by 10 every 30 epochs"""
+    lr = args.lr * (0.1 ** (epoch // 30))
+    for param_group in optimizer.param_groups:
+        param_group["lr"] = lr
+
+
+def accuracy(output, target, topk=(1,)):
+    """Computes the precision@k for the specified values of k"""
+    with torch.no_grad():
+        maxk = max(topk)
+        batch_size = target.size(0)
+
+        _, pred = output.topk(maxk, 1, True, True)
+        pred = pred.t()
+        correct = pred.eq(target.view(1, -1).expand_as(pred))
+
+        res = []
+        for k in topk:
+            correct_k = correct[:k].view(-1).float().sum(0, keepdim=True)
+            res.append(correct_k.mul_(100.0 / batch_size))
+        return res
+
+
+if __name__ == "__main__":
+    main()

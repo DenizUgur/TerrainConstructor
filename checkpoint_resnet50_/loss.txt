@@ -1,3 +1,0 @@
-================ Training Loss (Fri Dec 25 16:17:02 2020) ================
-world size: 1
-model created
