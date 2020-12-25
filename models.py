@@ -105,3 +105,120 @@ class VGG16(torch.nn.Module):
         vgg_outputs = namedtuple("VggOutputs", ['relu1_2', 'relu2_2', 'relu3_3', 'relu4_3'])
         out = vgg_outputs(h_relu1_2, h_relu2_2, h_relu3_3, h_relu4_3)
         return out
+
+
+class generator(nn.Module):
+
+    #generator model
+    def __init__(self):
+        super(generator,self).__init__()
+        
+
+        self.t1=nn.Sequential(
+            nn.Conv2d(in_channels=3,out_channels=64,kernel_size=(4,4),stride=2,padding=1),
+            nn.LeakyReLU(0.2,in_place=True)
+        )
+        
+        self.t2=nn.Sequential(
+            nn.Conv2d(in_channels=64,out_channels=64,kernel_size=(4,4),stride=2,padding=1),
+            nn.BatchNorm2d(64),
+            nn.LeakyReLU(0.2,in_place=True)
+        )
+        self.t3=nn.Sequential(
+            nn.Conv2d(in_channels=64,out_channels=128,kernel_size=(4,4),stride=2,padding=1),
+            nn.BatchNorm2d(128),
+            nn.LeakyReLU(0.2,in_place=True)
+        )
+        self.t4=nn.Sequential(
+            nn.Conv2d(in_channels=128,out_channels=256,kernel_size=(4,4),stride=2,padding=1),
+            nn.BatchNorm2d(256),
+            nn.LeakyReLU(0.2,in_place=True)
+        )
+        self.t5=nn.Sequential(
+            nn.Conv2d(in_channels=256,out_channels=512,kernel_size=(4,4),stride=2,padding=1),
+            nn.BatchNorm2d(512),
+            nn.LeakyReLU(0.2,in_place=True)
+            
+        )
+        self.t6=nn.Sequential(
+            nn.Conv2d(512,4000,kernel_size=(4,4)),#bottleneck
+            nn.BatchNorm2d(4000),
+            nn.ReLU()
+        )
+        self.t7=nn.Sequential(
+            nn.ConvTranspose2d(in_channels=512,out_channels=256,kernel_size=(4,4),stride=2,padding=1),
+            nn.BatchNorm2d(256),
+            nn.ReLU()
+            )
+        self.t8=nn.Sequential(
+            nn.ConvTranspose2d(in_channels=256,out_channels=128,kernel_size=(4,4),stride=2,padding=1),
+            nn.BatchNorm2d(128),
+            nn.ReLU()
+            )
+        self.t9=nn.Sequential(
+            nn.ConvTranspose2d(in_channels=128,out_channels=64,kernel_size=(4,4),stride=2,padding=1),
+            nn.BatchNorm2d(64),
+            nn.ReLU()
+            )
+        self.t10=nn.Sequential(
+            nn.ConvTranspose2d(in_channels=64,out_channels=3,kernel_size=(4,4),stride=2,padding=1),
+            nn.Tanh()
+            )
+           
+    
+    def forward(self,x):
+    	x=self.t1(x)
+    	x=self.t2(x)
+    	x=self.t3(x)
+    	x=self.t4(x)
+    	x=self.t5(x)
+    	x=self.t6(x)
+    	x=self.t7(x)
+    	x=self.t8(x)
+    	x=self.t9(x)
+    	x=self.t10(x)
+    	return x #output of generator
+
+
+
+    
+class discriminator(nn.Module):
+
+    #discriminator model
+    def __init__(self):
+        super(discriminator,self).__init__()
+        
+        self.t1=nn.Sequential(
+            nn.Conv2d(in_channels=3,out_channels=64,kernel_size=(4,4),stride=2,padding=1),
+            nn.LeakyReLU(0.2,in_place=True)
+        )
+        
+        self.t2=nn.Sequential(
+            nn.Conv2d(in_channels=64,out_channels=128,kernel_size=(4,4),stride=2,padding=1),
+            nn.BatchNorm2d(128),
+            nn.LeakyReLU(0.2,in_place=True)
+        )
+        
+        self.t3=nn.Sequential(
+            nn.Conv2d(in_channels=128,out_channels=256,kernel_size=(4,4),stride=2,padding=1),
+            nn.BatchNorm2d(256),
+            nn.LeakyReLU(0.2,in_place=True)
+        )
+        self.t4=nn.Sequential(
+            nn.Conv2d(in_channels=256,out_channels=512,kernel_size=(4,4),stride=2,padding=1),
+            nn.BatchNorm2d(512),
+            nn.LeakyReLU(0.2,in_place=True)
+        )
+        self.t5=nn.Sequential(
+            nn.Conv2d(in_channels=512,out_channels=1,kernel_size=(4,4),stride=1,padding=0),
+            nn.Sigmoid()
+        )
+            
+    
+    def forward(self,x):
+    	x=self.t1(x)
+    	x=self.t2(x)
+    	x=self.t3(x)
+    	x=self.t4(x)
+    	x=self.t5(x)
+    	return x #output of discriminator
