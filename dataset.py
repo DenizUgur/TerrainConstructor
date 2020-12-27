@@ -1,4 +1,5 @@
 import rasterio
+import torch
 from scipy.ndimage import zoom
 from skimage.draw import rectangle_perimeter, line
 from torch.utils.data import Dataset
@@ -85,7 +86,8 @@ class TerrainDataset(Dataset):
                 break
 
         adjusted = self.get_adjusted(self.current_blocks[rel_idx])
-        return self.viewshed(adjusted, idx), adjusted
+        viewshed, observer = self.viewshed(adjusted, idx)
+        return (torch.from_numpy(viewshed), observer), torch.from_numpy(adjusted)
 
     def viewshed(self, dem, seed):
         h, w = dem.shape
