@@ -1,19 +1,34 @@
 import rasterio
 from scipy.ndimage import zoom
 from skimage.draw import rectangle_perimeter, line
+from torch.utils.data import Dataset
 from tqdm import tqdm
 import numpy as np
 from glob import glob
 import random
 
 
-class Dataset:
-    def __init__(self, patch_size=30, sample_size=256, pad=50, block_variance=4, randomize=True):
+class TerrainDataset(Dataset):
+    def __init__(
+        self,
+        dataset_glob,
+        patch_size=30,
+        sample_size=256,
+        observer_pad=50,
+        block_variance=4,
+        randomize=True,
+        random_state=42,
+        transform=None,
+    ):
         """
+        dataset_glob -> glob to *.tif files (i.e. "data/MDRS/data/*.tif")
         patch_size -> the 1m^2 area to read from .TIF
         sample_size -> the 0.1m^2 res area to be trained sample size
+        observer_pad -> n pixels to pad before getting a random observer
         block_variance -> how many different observer points
-        pad -> n pixels to pad before getting a random observer
+        randomize -> predictable randomize
+        random_state -> a value that gets added to seed
+        transform -> if there is any, PyTorch Transforms
         """
         np.seterr(divide="ignore", invalid="ignore")
 
@@ -22,54 +37,64 @@ class Dataset:
         self.patch_size = patch_size
         self.sample_size = sample_size
         self.block_variance = block_variance
-        self.pad = pad
+        self.observer_pad = observer_pad
+
+        # * PyTorch Related Variables
+        self.transform = transform
 
         # * Gather files
-        self.files = glob("data/MDRS/data/*.tif")
+        self.files = glob(dataset_glob)
         self.randomize = randomize
+        self.random_state = random_state
         if self.randomize:
             random.shuffle(self.files)
 
-        # * Keep track of requested files
-        self.last_req_index = -1
-        self.blocks = None
+        # * Build dataset dictionary
+        self.sample_dict = dict()
+        start = 0
+        for file in tqdm(self.files, ncols=100):
+            blocks, mask = self.get_blocks(file)
+            self.sample_dict[file] = {
+                "start": start,
+                "end": start + len(blocks[mask]),
+                "mask": mask,
+            }
+            start += len(blocks[mask])
+            del blocks
 
-    def prepare(self):
-        if self.blocks is None or self.last_req_index == len(self.blocks):
-            # * Load new file
-            if len(self.files) == 0:
-                return False
+        # * Dataset state
+        self.current_file = None
+        self.current_blocks = None
 
-            self.blocks = self.get_blocks(self.files.pop())
-            if self.randomize:
-                random.shuffle(self.blocks)
+    def __len__(self):
+        key = list(self.sample_dict.keys())[-1]
+        return self.sample_dict[key]["end"]
 
-        return True
-
-    def get(self, index=None, batch=None, return_observer=False):
+    def __getitem__(self, idx):
         """
-        returns Viewsheded and Ground Truth
-        and optionally observer point
+        returns (x, (ox, oy, oz)), y
         """
-        if index is None:
-            self.last_req_index += 1
-            index = self.last_req_index
+        rel_idx = None
+        for file, info in self.sample_dict.items():
+            if idx >= info["start"] and idx < info["end"]:
+                rel_idx = idx - info["start"]
+                if self.current_file != file:
+                    b, m = self.get_blocks(file)
+                    self.current_blocks = b[m]
+                    self.current_file = file
+                break
 
-        adjusted = self.get_adjusted(self.blocks[index])
-        viewsheded, observer = self.viewshed(adjusted, index)
-
-        if return_observer:
-            return viewsheded, adjusted, observer
-        return viewsheded, adjusted
+        adjusted = self.get_adjusted(self.current_blocks[rel_idx])
+        return self.viewshed(adjusted, idx), adjusted
 
     def viewshed(self, dem, seed):
         h, w = dem.shape
-        np.random.seed(seed)
-        rands = np.random.rand(h - self.pad, w - self.pad)
+        np.random.seed(seed + self.random_state)
+        rands = np.random.rand(h - self.observer_pad, w - self.observer_pad)
         template = np.zeros_like(dem)
         template[
-            self.pad - self.pad // 2 : h - self.pad // 2,
-            self.pad - self.pad // 2 : w - self.pad // 2,
+            self.observer_pad - self.observer_pad // 2 : h - self.observer_pad // 2,
+            self.observer_pad - self.observer_pad // 2 : w - self.observer_pad // 2,
         ] = rands
         observer = tuple(np.argwhere(template == np.max(template))[0])
 
@@ -116,7 +141,6 @@ class Dataset:
         )
 
     def get_adjusted(self, block):
-        _, block = block
         zoomed = zoom(block, 10, order=1)
         y, x = zoomed.shape
         startx = x // 2 - (self.sample_size // 2)
@@ -154,14 +178,12 @@ class Dataset:
             grid = grid[0:w, 0 : h - (h % self.patch_size)]
 
         blocks = self.blockshaped(grid, self.patch_size)
-        usable_blocks = list(
-            filter(lambda x: np.count_nonzero(np.isnan(x)) == 0, blocks)
-        )
 
-        # * Increase variation
-        final_blocks = []
-        for block in usable_blocks:
-            for _ in range(self.block_variance):
-                final_blocks.append((len(final_blocks), block))
+        if self.randomize:
+            np.random.seed(int(str(abs(hash(file)))[:5]) + self.random_state)
+            np.random.shuffle(blocks)
 
-        return final_blocks
+        blocks = np.repeat(blocks, self.block_variance, axis=0)
+        mask = ~np.isnan(blocks).any(axis=1).any(axis=1)
+
+        return blocks, mask
