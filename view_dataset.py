@@ -38,18 +38,21 @@ if __name__ == "__main__":
     DL = DataLoader(dataset=TDS, batch_size=3, num_workers=0)
 
     #! CNN
-    model = ConvNet()#.to(device)
+    model = ConvNet().to(device)
     criterion = nn.CrossEntropyLoss()
     optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
 
     for i, ((x, _), y) in enumerate(DL):
-        print(i)
-        data = x#.to(device)
-        target = y#.to(device)
+        data = x.to(device)
+        target = y.to(device)
 
         optimizer.zero_grad()
         output = model(data)
-        loss = criterion(output, target.squeeze(1).long())
+        print("data.shape\t", data.shape)
+        print("target.shape\t", target.shape)
+        print("output.shape\t", output.shape)
+
+        loss = criterion(output, target)
         loss.backward()
         optimizer.step()
 
@@ -57,9 +60,9 @@ if __name__ == "__main__":
         npp = prediction.squeeze(0).numpy()
 
     # for (x, (ox, oy, _)), y in TDS:
-    #     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(32, 18))
-    #     ax1.contourf(x, levels=100)
-    #     ax2.contourf(y, levels=100)
+    #     fig, (ax1, ax2) = plt.subplots(1, 2)
+    #     ax1.contourf(x.squeeze(0).numpy(), levels=100)
+    #     ax2.contourf(y.squeeze(0).numpy(), levels=100)
 
     #     ax1.scatter(ox, oy, c="red", s=25)
     #     ax2.scatter(ox, oy, c="red", s=25)
