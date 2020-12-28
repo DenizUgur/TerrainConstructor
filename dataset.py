@@ -87,7 +87,14 @@ class TerrainDataset(Dataset):
 
         adjusted = self.get_adjusted(self.current_blocks[rel_idx])
         viewshed, observer = self.viewshed(adjusted, idx)
-        return (torch.from_numpy(viewshed), observer), torch.from_numpy(adjusted)
+
+        dataTensor = torch.from_numpy(viewshed)
+        dataTensor = dataTensor.unsqueeze(0)
+
+        targetTensor = torch.from_numpy(adjusted)
+        targetTensor = targetTensor.unsqueeze(0)
+
+        return (dataTensor, observer), targetTensor
 
     def viewshed(self, dem, seed):
         h, w = dem.shape
