@@ -3,6 +3,7 @@ import matplotlib.pyplot as plt
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
+from torchvision import transforms
 
 class ConvNet(nn.Module):
     def __init__(self):
@@ -35,16 +36,26 @@ if __name__ == "__main__":
     device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
 
     TDS = TerrainDataset("data/MDRS/data/*.tif")
-    DL = DataLoader(dataset=TDS, batch_size=3, num_workers=0)
+    DL = DataLoader(dataset=TDS, batch_size=1, num_workers=0)
 
     #! CNN
     model = ConvNet().to(device)
     criterion = nn.CrossEntropyLoss()
-    optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
+    optimizer = torch.optim.SGD(model.parameters(), lr=0.001)
 
+    count = 0
     for i, ((x, _), y) in enumerate(DL):
+
         data = x.to(device)
         target = y.to(device)
+
+        std = torch.std(target)
+        mean = torch.mean(target)
+
+        target = (target - (std+50))/mean
+
+        print(target)
+        print(target.shape)
 
         optimizer.zero_grad()
         output = model(data)
@@ -52,24 +63,33 @@ if __name__ == "__main__":
         print("target.shape\t", target.shape)
         print("output.shape\t", output.shape)
 
-        loss = criterion(output, target)
+        loss = criterion(output, target.squeeze(1).long())
         loss.backward()
         optimizer.step()
 
         _, prediction = torch.max(output.data, 1)
         npp = prediction.squeeze(0).numpy()
 
-    # for (x, (ox, oy, _)), y in TDS:
-    #     fig, (ax1, ax2) = plt.subplots(1, 2)
-    #     ax1.contourf(x.squeeze(0).numpy(), levels=100)
-    #     ax2.contourf(y.squeeze(0).numpy(), levels=100)
+        count += 1
+        if count == 5:
+            break
 
-    #     ax1.scatter(ox, oy, c="red", s=25)
-    #     ax2.scatter(ox, oy, c="red", s=25)
+    print(loss)
+    plt.contourf(npp, levels=100)
+    plt.show()
+        
 
-    #     fig.tight_layout()
-    #     plt.show(block=False)
-    #     no = str(input("Continue? "))
-    #     plt.close()
-    #     if no == "n":
-    #         exit(0)
+    for (x, (ox, oy, _)), y in TDS:
+        fig, (ax1, ax2) = plt.subplots(1, 2)
+        ax1.contourf(x.squeeze(0).numpy(), levels=100)
+        ax2.contourf(y.squeeze(0).numpy(), levels=100)
+
+        ax1.scatter(ox, oy, c="red", s=25)
+        ax2.scatter(ox, oy, c="red", s=25)
+
+        fig.tight_layout()
+        plt.show(block=False)
+        no = str(input("Continue? "))
+        plt.close()
+        if no == "n":
+            exit(0)
