@@ -8,6 +8,7 @@ import numpy as np
 from glob import glob
 import random
 
+
 class TerrainDataset(Dataset):
     def __init__(
         self,
@@ -58,24 +59,15 @@ class TerrainDataset(Dataset):
                 "start": start,
                 "end": start + len(blocks[mask]),
                 "mask": mask,
-                "median": np.median(blocks[mask]),
-                "std": np.std(blocks[mask]),
+                "min": np.min(blocks[mask]),
+                "max": np.max(blocks[mask]),
             }
             start += len(blocks[mask])
 
-        STDpool = 0
-        STDpop = 0
-        MEDpool = 0
-        for values in self.sample_dict.values():
-            pop = values["end"] - values["start"]
-            STDpop += pop
-            STDpool += (pop - 1) * (values["std"] ** 2)
-            MEDpool += pop * values["median"]
-        MEDpool /= STDpop
-        STDpool /= STDpop - len(self.sample_dict)
-        STDpool **= 0.5
-
-        self.sample_dict["meta"] = {"std": STDpool, "median": MEDpool}
+        self.sample_dict["meta"] = {
+            "min": min(self.sample_dict.values(), key=lambda x: x["min"])["min"],
+            "max": max(self.sample_dict.values(), key=lambda x: x["max"])["max"],
+        }
 
         # * Dataset state
         self.current_file = None
@@ -99,15 +91,13 @@ class TerrainDataset(Dataset):
                     self.current_file = file
                 break
 
+        meta_min = self.sample_dict["meta"]["min"]
+        meta_max = self.sample_dict["meta"]["max"]
         current = self.current_blocks[rel_idx]
+        current = (current - meta_min) / (meta_max - meta_min)
+
         adjusted = self.get_adjusted(current)
         viewshed, observer = self.viewshed(adjusted, idx)
-
-        median = self.sample_dict["meta"]["median"]
-        std = self.sample_dict["meta"]["std"]
-
-        adjusted = (adjusted - median) / std
-        viewshed = (viewshed - median) / std
 
         dataTensor = torch.from_numpy(viewshed)
         dataTensor = dataTensor.unsqueeze(0)
