@@ -73,17 +73,16 @@ class TerrainDataset(Dataset):
             if fast_load:
                 break
 
-        self.sample_dict["meta"] = {
-            "min": min(self.sample_dict.values(), key=lambda x: x["min"])["min"],
-            "max": max(self.sample_dict.values(), key=lambda x: x["max"])["max"],
-        }
+        self.data_min = min(self.sample_dict.values(), key=lambda x: x["min"])["min"]
+        self.data_max = max(self.sample_dict.values(), key=lambda x: x["max"])["max"]
+        self.data_range = self.data_max - self.data_min
 
         # * Dataset state
         self.current_file = None
         self.current_blocks = None
 
     def __len__(self):
-        key = list(self.sample_dict.keys())[-2]
+        key = list(self.sample_dict.keys())[-1]
         return self.sample_dict[key]["end"]
 
     def __getitem__(self, idx):
@@ -100,13 +99,10 @@ class TerrainDataset(Dataset):
                     self.current_file = file
                 break
 
-        meta_min = self.sample_dict["meta"]["min"]
-        h_range = self.sample_dict["meta"]["max"] - meta_min
         current = np.copy(self.current_blocks[rel_idx])
-
-        current -= self.sample_dict["meta"]["min"]
-        current /= h_range
-        oh = self.observer_height / h_range
+        current -= np.min(current)
+        current /= self.data_range
+        oh = self.observer_height / self.data_range
 
         adjusted = self.get_adjusted(current)
         viewshed, observer = self.viewshed(adjusted, oh, idx)
@@ -149,7 +145,7 @@ class TerrainDataset(Dataset):
             max_so_far = -np.inf
             for yi, xi, mi in zip(ray_y, ray_x, m):
                 if mi < max_so_far:
-                    viewshed[yi, xi] = np.nan
+                    viewshed[yi, xi] = -10
                 else:
                     max_so_far = mi
 
