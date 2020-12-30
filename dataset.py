@@ -92,12 +92,15 @@ class TerrainDataset(Dataset):
                 break
 
         meta_min = self.sample_dict["meta"]["min"]
-        meta_max = self.sample_dict["meta"]["max"]
+        h_range = self.sample_dict["meta"]["max"] - meta_min
         current = self.current_blocks[rel_idx]
-        current = (current - meta_min) / (meta_max - meta_min)
+
+        current -= self.sample_dict["meta"]["min"]
+        current /= h_range
+        oh = self.observer_height / h_range
 
         adjusted = self.get_adjusted(current)
-        viewshed, observer = self.viewshed(adjusted, idx)
+        viewshed, observer = self.viewshed(adjusted, oh, idx)
 
         dataTensor = torch.from_numpy(viewshed)
         dataTensor = dataTensor.unsqueeze(0)
@@ -107,7 +110,7 @@ class TerrainDataset(Dataset):
 
         return (dataTensor, observer), targetTensor
 
-    def viewshed(self, dem, seed):
+    def viewshed(self, dem, oh, seed):
         h, w = dem.shape
         np.random.seed(seed + self.random_state)
         rands = np.random.rand(h - self.observer_pad, w - self.observer_pad)
@@ -119,7 +122,7 @@ class TerrainDataset(Dataset):
         observer = tuple(np.argwhere(template == np.max(template))[0])
 
         yp, xp = observer
-        zp = dem[observer] + self.observer_height
+        zp = dem[observer] + oh
         observer = (xp, yp, zp)
         viewshed = np.copy(dem)
 
