@@ -19,6 +19,7 @@ class TerrainDataset(Dataset):
         block_variance=4,
         randomize=True,
         random_state=42,
+        fast_load=False,
         transform=None,
     ):
         """
@@ -29,6 +30,7 @@ class TerrainDataset(Dataset):
         block_variance -> how many different observer points
         randomize -> predictable randomize
         random_state -> a value that gets added to seed
+        fast_load -> initialize from npy file, Warning: Dragons be aware
         transform -> if there is any, PyTorch Transforms
         """
         np.seterr(divide="ignore", invalid="ignore")
@@ -45,7 +47,7 @@ class TerrainDataset(Dataset):
 
         # * Gather files
         self.files = glob(dataset_glob)
-        self.randomize = randomize
+        self.randomize = False if fast_load else randomize
         self.random_state = random_state
         if self.randomize:
             random.shuffle(self.files)
@@ -53,8 +55,12 @@ class TerrainDataset(Dataset):
         # * Build dataset dictionary
         self.sample_dict = dict()
         start = 0
-        for file in tqdm(self.files, ncols=100):
-            blocks, mask = self.get_blocks(file)
+        for file in tqdm(self.files, ncols=100, disable=fast_load):
+            if fast_load:
+                blocks, mask = np.load("tmp/blocks.npy"), np.load("tmp/mask.npy")
+            else:
+                blocks, mask = self.get_blocks(file)
+
             self.sample_dict[file] = {
                 "start": start,
                 "end": start + len(blocks[mask]),
@@ -63,6 +69,9 @@ class TerrainDataset(Dataset):
                 "max": np.max(blocks[mask]),
             }
             start += len(blocks[mask])
+
+            if fast_load:
+                break
 
         self.sample_dict["meta"] = {
             "min": min(self.sample_dict.values(), key=lambda x: x["min"])["min"],
@@ -93,7 +102,7 @@ class TerrainDataset(Dataset):
 
         meta_min = self.sample_dict["meta"]["min"]
         h_range = self.sample_dict["meta"]["max"] - meta_min
-        current = self.current_blocks[rel_idx]
+        current = np.copy(self.current_blocks[rel_idx])
 
         current -= self.sample_dict["meta"]["min"]
         current /= h_range

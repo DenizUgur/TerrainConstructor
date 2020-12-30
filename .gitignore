@@ -1,5 +1,7 @@
 data/
 referance/
+wandb/
+tmp/
 .vsls.json
 __pycache__
 .vscode
