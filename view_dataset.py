@@ -49,11 +49,6 @@ if __name__ == "__main__":
         data = x.to(device)
         target = y.to(device)
 
-        std = torch.std(target)
-        mean = torch.mean(target)
-
-        target = (target - (std+50))/mean
-
         print(target)
         print(target.shape)
 
@@ -68,14 +63,14 @@ if __name__ == "__main__":
         optimizer.step()
 
         _, prediction = torch.max(output.data, 1)
-        npp = prediction.squeeze(0).numpy()
+        npp = prediction.squeeze(0).cpu().numpy()
 
         count += 1
         if count == 5:
             break
 
     print(loss)
-    plt.contourf(npp, levels=100)
+    plt.contourf(target.cpu().squeeze(1).numpy(), levels=100)
     plt.show()
         
 
