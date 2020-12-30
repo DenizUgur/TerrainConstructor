@@ -8,7 +8,6 @@ import numpy as np
 from glob import glob
 import random
 
-
 class TerrainDataset(Dataset):
     def __init__(
         self,
@@ -59,16 +58,31 @@ class TerrainDataset(Dataset):
                 "start": start,
                 "end": start + len(blocks[mask]),
                 "mask": mask,
+                "median": np.median(blocks[mask]),
+                "std": np.std(blocks[mask]),
             }
             start += len(blocks[mask])
-            del blocks
+
+        STDpool = 0
+        STDpop = 0
+        MEDpool = 0
+        for values in self.sample_dict.values():
+            pop = values["end"] - values["start"]
+            STDpop += pop
+            STDpool += (pop - 1) * (values["std"] ** 2)
+            MEDpool += pop * values["median"]
+        MEDpool /= STDpop
+        STDpool /= STDpop - len(self.sample_dict)
+        STDpool **= 0.5
+
+        self.sample_dict["meta"] = {"std": STDpool, "median": MEDpool}
 
         # * Dataset state
         self.current_file = None
         self.current_blocks = None
 
     def __len__(self):
-        key = list(self.sample_dict.keys())[-1]
+        key = list(self.sample_dict.keys())[-2]
         return self.sample_dict[key]["end"]
 
     def __getitem__(self, idx):
@@ -85,8 +99,15 @@ class TerrainDataset(Dataset):
                     self.current_file = file
                 break
 
-        adjusted = self.get_adjusted(self.current_blocks[rel_idx])
+        current = self.current_blocks[rel_idx]
+        adjusted = self.get_adjusted(current)
         viewshed, observer = self.viewshed(adjusted, idx)
+
+        median = self.sample_dict["meta"]["median"]
+        std = self.sample_dict["meta"]["std"]
+
+        adjusted = (adjusted - median) / std
+        viewshed = (viewshed - median) / std
 
         dataTensor = torch.from_numpy(viewshed)
         dataTensor = dataTensor.unsqueeze(0)
