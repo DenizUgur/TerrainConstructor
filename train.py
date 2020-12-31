@@ -1,6 +1,7 @@
 from dataset import TerrainDataset
 import matplotlib.pyplot as plt
-from model import ConvNet
+from model import *
+from ssim import *
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
@@ -9,17 +10,19 @@ import wandb
 import sys
 
 
+def revert_range(x, fix_nan=False):
+    if fix_nan:
+        x[x == -10] = np.nan
+    x *= TDS.data_range
+    x += TDS.data_min
+    return x
+
+
 def draw(v, gt, pr):
     vs, (ox, oy, _) = v
-    vs[vs == -10] = np.nan
-    vs *= TDS.data_range
-    vs += TDS.data_min
-
-    gt *= TDS.data_range
-    gt += TDS.data_min
-
-    pr *= TDS.data_range
-    pr += TDS.data_min
+    vs = revert_range(vs, fix_nan=True)
+    gt = revert_range(gt)
+    pr = revert_range(pr)
 
     fig, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=(18, 6))
     map_vs = ax1.contourf(vs, levels=100)
@@ -44,42 +47,49 @@ if __name__ == "__main__":
 
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
-    TDS = TerrainDataset("data/MDRS/data/*.tif", fast_load=True)
-    DL = DataLoader(dataset=TDS, batch_size=1, num_workers=0)
-    model = ConvNet().to(device)
+    TDS = TerrainDataset("data/MDRS/data/*.tif", fast_load=not publish)
+    DL = DataLoader(dataset=TDS, batch_size=4, num_workers=0)
+    model = FingerNet().to(device)
 
     if publish:
         wandb.init(project="trc-1")
         config = wandb.config
-        config.learning_rate = 0.001
+        config.learning_rate = 0.01
         wandb.watch(model)
 
     print(model)
+    model.train()
     criterion = nn.MSELoss()
-    optimizer = torch.optim.SGD(model.parameters(), lr=0.001)
+    optimizer = torch.optim.Adam(model.parameters(), lr=0.01)
 
     for i, ((x, o), y) in enumerate(DL):
         data = x.to(device)
         target = y.to(device)
 
-        optimizer.zero_grad()
         output = model(data)
         loss = criterion(output, target)
+
+        optimizer.zero_grad()
         loss.backward()
         optimizer.step()
 
         if publish:
             wandb.log({"loss": loss})
         else:
-            print(i, loss)
+            print(
+                "Iteration #{} :: Loss = {:.4f} SSIM = {:.4f}".format(
+                    i + 1, loss.item(), ssim(output, target, window_size=127)
+                )
+            )
 
-        if i > 10:
-            vs = x[0].squeeze(0).numpy()
-            gt = y[0].squeeze(0).numpy()
+        if i > 250:
+            vs = x[0].squeeze(0).cpu().numpy()
+            gt = y[0].squeeze(0).cpu().numpy()
             pr = output.data[0].squeeze(0).cpu().numpy()
             draw((vs, o), gt, pr)
             break
 
+    exit(0)
     model.eval()
     with torch.no_grad():
         for i, ((x, o), y) in enumerate(DL):

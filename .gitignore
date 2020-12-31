@@ -2,6 +2,7 @@ data/
 referance/
 wandb/
 tmp/
+backup/
 .vsls.json
 __pycache__
 .vscode

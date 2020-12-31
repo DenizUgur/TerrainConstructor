@@ -17,6 +17,7 @@ class TerrainDataset(Dataset):
         sample_size=256,
         observer_pad=50,
         block_variance=4,
+        observer_height=0.75,
         randomize=True,
         random_state=42,
         fast_load=False,
@@ -28,6 +29,7 @@ class TerrainDataset(Dataset):
         sample_size -> the 0.1m^2 res area to be trained sample size
         observer_pad -> n pixels to pad before getting a random observer
         block_variance -> how many different observer points
+        observer_height -> Observer Height
         randomize -> predictable randomize
         random_state -> a value that gets added to seed
         fast_load -> initialize from npy file, Warning: Dragons be aware
@@ -36,7 +38,7 @@ class TerrainDataset(Dataset):
         np.seterr(divide="ignore", invalid="ignore")
 
         # * Set Dataset attributes
-        self.observer_height = 0.75
+        self.observer_height = observer_height
         self.patch_size = patch_size
         self.sample_size = sample_size
         self.block_variance = block_variance
@@ -70,6 +72,7 @@ class TerrainDataset(Dataset):
             }
             start += len(blocks[mask])
 
+            del blocks
             if fast_load:
                 break
 
@@ -106,6 +109,8 @@ class TerrainDataset(Dataset):
 
         adjusted = self.get_adjusted(current)
         viewshed, observer = self.viewshed(adjusted, oh, idx)
+        mask = np.isnan(viewshed)
+        viewshed[mask] = -10
 
         dataTensor = torch.from_numpy(viewshed)
         dataTensor = dataTensor.unsqueeze(0)
@@ -145,7 +150,7 @@ class TerrainDataset(Dataset):
             max_so_far = -np.inf
             for yi, xi, mi in zip(ray_y, ray_x, m):
                 if mi < max_so_far:
-                    viewshed[yi, xi] = -10
+                    viewshed[yi, xi] = np.nan
                 else:
                     max_so_far = mi
 
