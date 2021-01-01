@@ -5,6 +5,7 @@ from skimage.draw import rectangle_perimeter, line
 from torch.utils.data import Dataset
 from tqdm import tqdm
 import numpy as np
+from scipy import stats
 from glob import glob
 import random
 
@@ -39,10 +40,13 @@ class TerrainDataset(Dataset):
 
         # * Set Dataset attributes
         self.observer_height = observer_height
-        self.patch_size = patch_size
         self.sample_size = sample_size
         self.block_variance = block_variance
         self.observer_pad = observer_pad
+
+        self.patch_size = patch_size
+        if self.patch_size % 2 == 0:
+            self.patch_size += 1
 
         # * PyTorch Related Variables
         self.transform = transform
@@ -69,8 +73,11 @@ class TerrainDataset(Dataset):
                 "mask": mask,
                 "min": np.min(blocks[mask]),
                 "max": np.max(blocks[mask]),
+                "range": np.max(self.get_ranges(blocks[mask])),
             }
             start += len(blocks[mask])
+
+            print(np.max(self.get_ranges(blocks[mask])), len(blocks[mask]))
 
             del blocks
             if fast_load:
@@ -78,7 +85,9 @@ class TerrainDataset(Dataset):
 
         self.data_min = min(self.sample_dict.values(), key=lambda x: x["min"])["min"]
         self.data_max = max(self.sample_dict.values(), key=lambda x: x["max"])["max"]
-        self.data_range = self.data_max - self.data_min
+        self.data_range = max(self.sample_dict.values(), key=lambda x: x["range"])[
+            "range"
+        ]
 
         # * Dataset state
         self.current_file = None
@@ -182,10 +191,12 @@ class TerrainDataset(Dataset):
             starty : starty + self.sample_size, startx : startx + self.sample_size
         ]
 
-    def get_blocks(self, file):
-        if self.patch_size % 2 == 0:
-            self.patch_size += 1
+    def get_ranges(self, x):
+        bmax = np.max(x.reshape(-1, self.patch_size ** 2), axis=1)
+        bmin = np.min(x.reshape(-1, self.patch_size ** 2), axis=1)
+        return bmax - bmin
 
+    def get_blocks(self, file):
         raster = rasterio.open(file)
         grid = raster.read(1)
 
@@ -216,7 +227,15 @@ class TerrainDataset(Dataset):
             np.random.seed(int(str(abs(hash(file)))[:5]) + self.random_state)
             np.random.shuffle(blocks)
 
+        # * Add Variance
         blocks = np.repeat(blocks, self.block_variance, axis=0)
+
+        # * Remove blocks that contain nans
         mask = ~np.isnan(blocks).any(axis=1).any(axis=1)
+        blocks = blocks[mask]
+
+        # * Further filter remeaning data in relation to z-score
+        ranges = self.get_ranges(blocks)
+        mask = np.abs(stats.zscore(ranges)) < 1.5
 
         return blocks, mask
