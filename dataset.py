@@ -10,6 +10,40 @@ from glob import glob
 import random
 
 
+class Helper:
+    def __init__(self) -> None:
+        super().__init__()
+
+    @staticmethod
+    def get_ranges(x):
+        bmax = np.max(x.reshape(-1, x.shape[2] ** 2), axis=1)
+        bmin = np.min(x.reshape(-1, x.shape[2] ** 2), axis=1)
+        return bmax - bmin
+
+    @staticmethod
+    def get_tri(x):
+        return np.apply_along_axis(Helper._get_tri, 1, x.reshape(-1, x.shape[2] ** 2))
+
+    @staticmethod
+    def _get_tri(x):
+        now = x.reshape(-1, 30)
+        tri = np.zeros_like(now)
+
+        d = 1
+        for i in range(1, 29):
+            for j in range(1, 29):
+                tri[i, j] = np.sqrt(
+                    np.sum(
+                        np.power(
+                            now[i - d : i + d + 1, j - d : j + d + 1].flatten()
+                            - now[i, j],
+                            2,
+                        )
+                    )
+                )
+        return stats.trim_mean(tri.flatten(), 0.2)
+
+
 class TerrainDataset(Dataset):
     def __init__(
         self,
@@ -40,13 +74,10 @@ class TerrainDataset(Dataset):
 
         # * Set Dataset attributes
         self.observer_height = observer_height
+        self.patch_size = patch_size
         self.sample_size = sample_size
         self.block_variance = block_variance
         self.observer_pad = observer_pad
-
-        self.patch_size = patch_size
-        if self.patch_size % 2 == 0:
-            self.patch_size += 1
 
         # * PyTorch Related Variables
         self.transform = transform
@@ -65,7 +96,7 @@ class TerrainDataset(Dataset):
             if fast_load:
                 blocks, mask = np.load("tmp/blocks.npy"), np.load("tmp/mask.npy")
             else:
-                blocks, mask = self.get_blocks(file)
+                blocks, mask = self.get_blocks(file, return_mask=True)
 
             self.sample_dict[file] = {
                 "start": start,
@@ -73,11 +104,9 @@ class TerrainDataset(Dataset):
                 "mask": mask,
                 "min": np.min(blocks[mask]),
                 "max": np.max(blocks[mask]),
-                "range": np.max(self.get_ranges(blocks[mask])),
+                "range": np.max(Helper.get_ranges(blocks[mask])),
             }
             start += len(blocks[mask])
-
-            print(np.max(self.get_ranges(blocks[mask])), len(blocks[mask]))
 
             del blocks
             if fast_load:
@@ -106,8 +135,8 @@ class TerrainDataset(Dataset):
             if idx >= info["start"] and idx < info["end"]:
                 rel_idx = idx - info["start"]
                 if self.current_file != file:
-                    b, m = self.get_blocks(file)
-                    self.current_blocks = b[m]
+                    b = self.get_blocks(file)
+                    self.current_blocks = b[info["mask"]]
                     self.current_file = file
                 break
 
@@ -191,12 +220,7 @@ class TerrainDataset(Dataset):
             starty : starty + self.sample_size, startx : startx + self.sample_size
         ]
 
-    def get_ranges(self, x):
-        bmax = np.max(x.reshape(-1, self.patch_size ** 2), axis=1)
-        bmin = np.min(x.reshape(-1, self.patch_size ** 2), axis=1)
-        return bmax - bmin
-
-    def get_blocks(self, file):
+    def get_blocks(self, file, return_mask=False):
         raster = rasterio.open(file)
         grid = raster.read(1)
 
@@ -234,12 +258,17 @@ class TerrainDataset(Dataset):
         mask = ~np.isnan(blocks).any(axis=1).any(axis=1)
         blocks = blocks[mask]
 
-        # * Further filter remeaning data in relation to z-score
-        ranges = self.get_ranges(blocks)
-        mask_u = np.abs(stats.zscore(ranges)) < 1.5
-        mask_l = np.abs(stats.zscore(ranges)) > 0.05
-        mask = mask_l & mask_u
+        if return_mask:
+            # * Further filter remeaning data in relation to z-score
+            ranges = Helper.get_ranges(blocks)
+            mask_ru = np.abs(stats.zscore(ranges)) < 2
+            mask_rl = np.abs(stats.zscore(ranges)) > 0.05
 
-        #TODO: Terrain Ruggedness Index
+            # # * Terrain Ruggedness Index
+            # tri = Helper.get_tri(blocks)
+            # mask_tu = np.abs(stats.zscore(tri)) < 2
+            # mask_tl = np.abs(stats.zscore(tri)) > 0.05
 
-        return blocks, mask
+            mask = mask_ru & mask_rl # & mask_tu & mask_tl
+            return blocks, mask
+        return blocks
