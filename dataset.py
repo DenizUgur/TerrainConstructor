@@ -236,6 +236,10 @@ class TerrainDataset(Dataset):
 
         # * Further filter remeaning data in relation to z-score
         ranges = self.get_ranges(blocks)
-        mask = np.abs(stats.zscore(ranges)) < 1.5
+        mask_u = np.abs(stats.zscore(ranges)) < 1.5
+        mask_l = np.abs(stats.zscore(ranges)) > 0.05
+        mask = mask_l & mask_u
+
+        #TODO: Terrain Ruggedness Index
 
         return blocks, mask
