@@ -7,3 +7,4 @@ tqdm
 rasterio
 scipy
 scikit-image
+alive-progress
