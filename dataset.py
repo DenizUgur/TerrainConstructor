@@ -48,6 +48,7 @@ class TerrainDataset(Dataset):
     def __init__(
         self,
         dataset_glob,
+        dataset_type,
         patch_size=30,
         sample_size=256,
         observer_pad=50,
@@ -55,11 +56,13 @@ class TerrainDataset(Dataset):
         observer_height=0.75,
         randomize=True,
         random_state=42,
+        usable_portion=0.8,
         fast_load=False,
         transform=None,
     ):
         """
         dataset_glob -> glob to *.tif files (i.e. "data/MDRS/data/*.tif")
+        dataset_type -> train or validation
         patch_size -> the 1m^2 area to read from .TIF
         sample_size -> the 0.1m^2 res area to be trained sample size
         observer_pad -> n pixels to pad before getting a random observer
@@ -67,6 +70,7 @@ class TerrainDataset(Dataset):
         observer_height -> Observer Height
         randomize -> predictable randomize
         random_state -> a value that gets added to seed
+        usable_portion -> What % of the data will be used
         fast_load -> initialize from npy file, Warning: Dragons be aware
         transform -> if there is any, PyTorch Transforms
         """
@@ -84,6 +88,8 @@ class TerrainDataset(Dataset):
 
         # * Gather files
         self.files = glob(dataset_glob)
+        self.dataset_type = dataset_type
+        self.usable_portion = usable_portion
         self.randomize = False if fast_load else randomize
         self.random_state = random_state
         if self.randomize:
@@ -247,6 +253,11 @@ class TerrainDataset(Dataset):
 
         blocks = self.blockshaped(grid, self.patch_size)
 
+        if self.dataset_type == "train":
+            blocks = blocks[: int(len(blocks) * self.usable_portion)]
+        else:
+            blocks = blocks[int(len(blocks) * self.usable_portion) :]
+
         if self.randomize:
             np.random.seed(int(str(abs(hash(file)))[:5]) + self.random_state)
             np.random.shuffle(blocks)
@@ -269,6 +280,6 @@ class TerrainDataset(Dataset):
             # mask_tu = np.abs(stats.zscore(tri)) < 2
             # mask_tl = np.abs(stats.zscore(tri)) > 0.05
 
-            mask = mask_ru & mask_rl # & mask_tu & mask_tl
+            mask = mask_ru & mask_rl  # & mask_tu & mask_tl
             return blocks, mask
         return blocks

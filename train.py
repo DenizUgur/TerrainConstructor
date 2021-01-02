@@ -1,21 +1,16 @@
 from dataset import TerrainDataset
 import matplotlib.pyplot as plt
-from model import *
-from ssim import *
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
+from timeit import default_timer as dt
 import numpy as np
+from alive_progress import alive_bar
 import wandb
-import sys
+import os
 
-
-def revert_range(x, fix_nan=False):
-    if fix_nan:
-        x[x == -10] = np.nan
-    x *= TDS.data_range
-    x += TDS.data_min
-    return x
+from utils.inpainting_utils import *
+from models.skip import skip
 
 
 def draw(v, gt, pr):
@@ -37,66 +32,125 @@ def draw(v, gt, pr):
     fig.colorbar(map_gt, ax=ax2)
     fig.colorbar(map_pr, ax=ax3)
     fig.tight_layout()
-    plt.show()
 
 
 if __name__ == "__main__":
-    publish = False
-    if len(sys.argv) > 1:
-        publish = sys.argv[1] == "publish"
-
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+    model_name = "full"
 
-    TDS = TerrainDataset("data/MDRS/data/*.tif", fast_load=not publish)
-    DL = DataLoader(dataset=TDS, batch_size=4, num_workers=0)
-    model = FingerNet().to(device)
+    TDS_T = TerrainDataset(
+        "data/MDRS/data/*.tif", dataset_type="train", randomize=False
+    )
+    DL_T = DataLoader(dataset=TDS_T, batch_size=1, num_workers=0)
 
-    if publish:
-        wandb.init(project="trc-1")
-        config = wandb.config
-        config.learning_rate = 0.01
-        wandb.watch(model)
+    TDS_V = TerrainDataset(
+        "data/MDRS/data/*.tif", dataset_type="validation", randomize=False
+    )
+    DL_V = DataLoader(dataset=TDS_V, batch_size=1, num_workers=0)
 
-    print(model)
-    model.train()
+    net = skip(
+        1,
+        1,
+        num_channels_down=[16, 32, 64, 128, 128, 128],
+        num_channels_up=[16, 32, 64, 128, 128, 128],
+        num_channels_skip=[0, 0, 0, 0, 0, 0],
+        filter_size_up=3,
+        filter_size_down=5,
+        filter_skip_size=1,
+        upsample_mode="nearest",  # downsample_mode='avg',
+        need1x1_up=False,
+        need_sigmoid=True,
+        need_bias=True,
+        pad="reflection",
+        act_fun="LeakyReLU",
+    ).to(device)
+    print(net)
+
+    LR = 0.01
+    net.train()
     criterion = nn.MSELoss()
-    optimizer = torch.optim.Adam(model.parameters(), lr=0.01)
+    optimizer = torch.optim.Adam(net.parameters(), lr=LR)
 
-    for i, ((x, o), y) in enumerate(DL):
-        data = x.to(device)
-        target = y.to(device)
+    wandb.init(project="trc-1")
+    config = wandb.config
+    config.learning_rate = LR
+    wandb.watch(net)
 
-        output = model(data)
-        loss = criterion(output, target)
+    # * Information
+    print(
+        "# of parameters = {:,}".format(
+            sum(np.prod(list(p.size())) for p in net.parameters())
+        )
+    )
 
-        optimizer.zero_grad()
-        loss.backward()
-        optimizer.step()
+    # * Training Loop parameters
+    iterations = 1
+    epochs = 300
+    train = False
+    reset = False
 
-        if publish:
-            wandb.log({"loss": loss})
+    if os.path.exists("tds-1/{}.pt".format(model_name)):
+        if reset:
+            os.remove("tds-1/{}.pt".format(model_name))
         else:
-            print(
-                "Iteration #{} :: Loss = {:.4f} SSIM = {:.4f}".format(
-                    i + 1, loss.item(), ssim(output, target, window_size=127)
-                )
-            )
+            checkpoint = torch.load("tds-1/{}.pt".format(model_name))
+            net.load_state_dict(checkpoint["model_state_dict"])
+            optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+            loss = checkpoint["loss"]
 
-        if i > 250:
-            vs = x[0].squeeze(0).cpu().numpy()
-            gt = y[0].squeeze(0).cpu().numpy()
-            pr = output.data[0].squeeze(0).cpu().numpy()
-            draw((vs, o), gt, pr)
-            break
+    if train:
+        try:
+            with alive_bar(epochs) as bar:
+                for epoch in range(epochs):
+                    for i, ((x, o), y) in enumerate(DL_T):
+                        data = x.to(device)
+                        target = y.to(device)
+                        output = net(data)
+                        loss = criterion(output, target)
 
-    exit(0)
-    model.eval()
-    with torch.no_grad():
-        for i, ((x, o), y) in enumerate(DL):
-            output = model(x.to(device))
-            if i > -1:
-                vs = x[0].squeeze(0).numpy()
-                gt = y[0].squeeze(0).numpy()
+                        optimizer.zero_grad()
+                        loss.backward()
+                        optimizer.step()
+
+                        if publish:
+                            wandb.log({"loss": loss})
+
+                        if i % 10 == 0:
+                            torch.save(
+                                {
+                                    "model_state_dict": net.state_dict(),
+                                    "optimizer_state_dict": optimizer.state_dict(),
+                                    "loss": loss,
+                                },
+                                "tds-1/{}.pt".format(model_name),
+                            )
+
+                        if i + 1 == iterations:
+                            break
+                    bar.text("{:.15f}".format(loss.item()))
+                    bar()
+        except Exception as why:
+            print(why)
+
+        torch.save(
+            {
+                "model_state_dict": net.state_dict(),
+                "optimizer_state_dict": optimizer.state_dict(),
+                "loss": loss,
+            },
+            "tds-1/{}.pt".format(model_name),
+        )
+
+    if not train:
+        net.eval()
+        with torch.no_grad():
+            for i, ((x, o), y) in enumerate(DL):
+                output = net(x.to(device))
+                vs = x[0].squeeze(0).cpu().numpy()
+                gt = y[0].squeeze(0).cpu().numpy()
                 pr = output.data[0].squeeze(0).cpu().numpy()
                 draw((vs, o), gt, pr)
-                break
+                plt.show()
+
+                if i == 0:
+                    break
