@@ -104,6 +104,9 @@ class TerrainDataset(Dataset):
             else:
                 blocks, mask = self.get_blocks(file, return_mask=True)
 
+            if len(blocks) == 0:
+                continue
+
             self.sample_dict[file] = {
                 "start": start,
                 "end": start + len(blocks[mask]),
