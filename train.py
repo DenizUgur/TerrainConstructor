@@ -9,6 +9,7 @@ import os
 
 from utils.inpainting_utils import *
 from models.skip import skip
+from early_stopping import EarlyStopping
 
 hyperparameter_defaults = dict(
     batch_size=4,
@@ -90,6 +91,8 @@ def train():
     avg_train_losses = []
     # to track the average validation loss per epoch as the model trains
     avg_valid_losses = []
+
+    ES = EarlyStopping(patience=10)
 
     for epoch in tqdm(range(config.epochs), position=0, disable=not bar):
         ###################
@@ -173,6 +176,13 @@ def train():
         # clear lists to track next epoch
         train_losses = []
         valid_losses = []
+
+        # Check if the training is stale
+        ES(valid_loss, net, optimizer)
+
+        if ES.early_stop:
+            print("Early stopping")
+            break
 
 
 if __name__ == "__main__":
