@@ -1,0 +1,29 @@
+project: trc-1
+name: trc-s1
+description: Hyperparameter tune sweep
+program: train.py
+method: bayes
+metric:
+  name: validation_loss
+  goal: minimize
+early_terminate:
+  type: hyperband
+  s: 2
+  eta: 3
+  max_iter: 27
+parameters:
+  learning_rate:
+    min: 0.0001
+    max: 0.1
+  batch_size:
+    values: [1, 2, 4, 8]
+  epochs:
+    values: [350, 500, 1000]
+  train_samples:
+    values: [1000, 2500, 5000]
+  filter_size_up:
+    values: [3, 5, 7]
+  filter_size_down:
+    values: [3, 5, 7]
+  input_channels:
+    values: [128, 256]

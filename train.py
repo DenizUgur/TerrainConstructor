@@ -1,61 +1,57 @@
 from dataset import TerrainDataset
-import matplotlib.pyplot as plt
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
-from timeit import default_timer as dt
 import numpy as np
-from alive_progress import alive_bar
+from tqdm import tqdm
 import wandb
 import os
 
 from utils.inpainting_utils import *
 from models.skip import skip
 
-
-def draw(v, gt, pr):
-    vs, (ox, oy, _) = v
-    vs = revert_range(vs, fix_nan=True)
-    gt = revert_range(gt)
-    pr = revert_range(pr)
-
-    fig, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=(18, 6))
-    map_vs = ax1.contourf(vs, levels=100)
-    map_gt = ax2.contourf(gt, levels=100)
-    map_pr = ax3.contourf(pr, levels=100)
-
-    ax1.scatter(ox, oy, c="red", s=25)
-    ax2.scatter(ox, oy, c="red", s=25)
-    ax3.scatter(ox, oy, c="red", s=25)
-
-    fig.colorbar(map_vs, ax=ax1)
-    fig.colorbar(map_gt, ax=ax2)
-    fig.colorbar(map_pr, ax=ax3)
-    fig.tight_layout()
+hyperparameter_defaults = dict(
+    batch_size=4,
+    epochs=10,
+    learning_rate=0.001,
+    train_samples=1000,
+    filter_size_up=3,
+    filter_size_down=5,
+    input_channels=128,
+)
+wandb.init(config=hyperparameter_defaults, project="trc-1")
+config = wandb.config
 
 
-if __name__ == "__main__":
+def train():
+    # pylint: disable=no-member
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-    model_name = "full"
 
     TDS_T = TerrainDataset(
-        "data/MDRS/data/*.tif", dataset_type="train", randomize=False
+        "data/MDRS/data/*.tif",
+        dataset_type="train",
+        randomize=False,
+        limit_samples=config.train_samples,
     )
-    DL_T = DataLoader(dataset=TDS_T, batch_size=1, num_workers=0)
+    trainLoader = DataLoader(dataset=TDS_T, batch_size=config.batch_size, num_workers=0)
 
     TDS_V = TerrainDataset(
-        "data/MDRS/data/*.tif", dataset_type="validation", randomize=False
+        "data/MDRS/data/*.tif",
+        dataset_type="validation",
+        randomize=False,
+        limit_samples=config.train_samples // 2,
     )
-    DL_V = DataLoader(dataset=TDS_V, batch_size=1, num_workers=0)
+    valLoader = DataLoader(dataset=TDS_V, batch_size=config.batch_size, num_workers=0)
 
+    IC = config.input_channels
     net = skip(
         1,
         1,
-        num_channels_down=[16, 32, 64, 128, 128, 128],
-        num_channels_up=[16, 32, 64, 128, 128, 128],
+        num_channels_down=[IC / 8, IC / 4, IC / 2, IC, IC, IC],
+        num_channels_up=[IC / 8, IC / 4, IC / 2, IC, IC, IC],
         num_channels_skip=[0, 0, 0, 0, 0, 0],
-        filter_size_up=3,
-        filter_size_down=5,
+        filter_size_up=config.filter_size_up,
+        filter_size_down=config.filter_size_down,
         filter_skip_size=1,
         upsample_mode="nearest",  # downsample_mode='avg',
         need1x1_up=False,
@@ -64,93 +60,120 @@ if __name__ == "__main__":
         pad="reflection",
         act_fun="LeakyReLU",
     ).to(device)
-    print(net)
-
-    LR = 0.01
-    net.train()
-    criterion = nn.MSELoss()
-    optimizer = torch.optim.Adam(net.parameters(), lr=LR)
-
-    wandb.init(project="trc-1")
-    config = wandb.config
-    config.learning_rate = LR
     wandb.watch(net)
 
+    criterion = nn.MSELoss()
+    optimizer = torch.optim.Adam(net.parameters(), lr=config.learning_rate)
+
     # * Information
-    print(
-        "# of parameters = {:,}".format(
-            sum(np.prod(list(p.size())) for p in net.parameters())
-        )
-    )
+    params = sum(np.prod(list(p.size())) for p in net.parameters())
+    print("# of parameters = {:,}".format(params))
 
     # * Training Loop parameters
-    iterations = 1
-    epochs = 300
-    train = False
-    reset = False
+    bar = False
 
-    if os.path.exists("tds-1/{}.pt".format(model_name)):
-        if reset:
-            os.remove("tds-1/{}.pt".format(model_name))
-        else:
-            checkpoint = torch.load("tds-1/{}.pt".format(model_name))
-            net.load_state_dict(checkpoint["model_state_dict"])
-            optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
-            loss = checkpoint["loss"]
+    # reset = True
+    # model_name = "full"
+    # if os.path.exists("tds-1/{}.pt".format(model_name)):
+    #     if reset:
+    #         os.remove("tds-1/{}.pt".format(model_name))
+    #     else:
+    #         checkpoint = torch.load("tds-1/{}.pt".format(model_name))
+    #         net.load_state_dict(checkpoint["model_state_dict"])
+    #         optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
 
-    if train:
-        try:
-            with alive_bar(epochs) as bar:
-                for epoch in range(epochs):
-                    for i, ((x, o), y) in enumerate(DL_T):
-                        data = x.to(device)
-                        target = y.to(device)
-                        output = net(data)
-                        loss = criterion(output, target)
+    # to track the training loss as the model trains
+    train_losses = []
+    # to track the validation loss as the model trains
+    valid_losses = []
+    # to track the average training loss per epoch as the model trains
+    avg_train_losses = []
+    # to track the average validation loss per epoch as the model trains
+    avg_valid_losses = []
 
-                        optimizer.zero_grad()
-                        loss.backward()
-                        optimizer.step()
+    for epoch in tqdm(range(config.epochs), position=0, disable=not bar):
+        ###################
+        # train the model #
+        ###################
+        net.train()
+        for i, ((data, _), target) in tqdm(
+            enumerate(trainLoader), total=len(trainLoader), position=1, disable=not bar
+        ):
+            # send iteration data to GPU
+            data = data.cuda()
+            target = target.cuda()
+            # clear the gradients of all optimized variables
+            optimizer.zero_grad()
+            # forward pass: compute predicted outputs by passing inputs to the model
+            output = net(data)
+            # calculate the loss
+            loss = criterion(output, target)
+            # backward pass: compute gradient of the loss with respect to model parameters
+            loss.backward()
+            # perform a single optimization step (parameter update)
+            optimizer.step()
+            # record training loss
+            train_losses.append(loss.item())
+            wandb.log(
+                {
+                    "train_loss": loss.item(),
+                    "train_loss_x": epoch * len(trainLoader) + i,
+                }
+            )
 
-                        if publish:
-                            wandb.log({"loss": loss})
+        ######################
+        # validate the model #
+        ######################
+        net.eval()  # prep model for evaluation
+        for i, ((data, _), target) in tqdm(
+            enumerate(valLoader), total=len(valLoader), position=2, disable=not bar
+        ):
+            # send iteration data to GPU
+            data = data.cuda()
+            target = target.cuda()
+            # forward pass: compute predicted outputs by passing inputs to the model
+            output = net(data)
+            # calculate the loss
+            loss = criterion(output, target)
+            # record validation loss
+            valid_losses.append(loss.item())
+            wandb.log(
+                {
+                    "validation_loss": loss.item(),
+                    "val_loss_x": epoch * len(valLoader) + i,
+                }
+            )
 
-                        if i % 10 == 0:
-                            torch.save(
-                                {
-                                    "model_state_dict": net.state_dict(),
-                                    "optimizer_state_dict": optimizer.state_dict(),
-                                    "loss": loss,
-                                },
-                                "tds-1/{}.pt".format(model_name),
-                            )
+        # print training/validation statistics
+        # calculate average loss over an epoch
+        train_loss = np.average(train_losses)
+        valid_loss = np.average(valid_losses)
+        avg_train_losses.append(train_loss)
+        avg_valid_losses.append(valid_loss)
 
-                        if i + 1 == iterations:
-                            break
-                    bar.text("{:.15f}".format(loss.item()))
-                    bar()
-        except Exception as why:
-            print(why)
-
-        torch.save(
+        wandb.log(
             {
-                "model_state_dict": net.state_dict(),
-                "optimizer_state_dict": optimizer.state_dict(),
-                "loss": loss,
-            },
-            "tds-1/{}.pt".format(model_name),
+                "avg_train_loss": train_loss,
+                "avg_valid_loss": valid_loss,
+                "avg_loss_x": epoch,
+            }
         )
 
-    if not train:
-        net.eval()
-        with torch.no_grad():
-            for i, ((x, o), y) in enumerate(DL):
-                output = net(x.to(device))
-                vs = x[0].squeeze(0).cpu().numpy()
-                gt = y[0].squeeze(0).cpu().numpy()
-                pr = output.data[0].squeeze(0).cpu().numpy()
-                draw((vs, o), gt, pr)
-                plt.show()
+        epoch_len = len(str(config.epochs))
 
-                if i == 0:
-                    break
+        print_msg = (
+            f"[{epoch:>{epoch_len}}/{config.epochs:>{epoch_len}}] "
+            + f"train_loss: {train_loss:.5f} "
+            + f"valid_loss: {valid_loss:.5f}"
+        )
+
+        if not bar:
+            print(print_msg)
+
+        # clear lists to track next epoch
+        train_losses = []
+        valid_losses = []
+
+
+if __name__ == "__main__":
+    train()
