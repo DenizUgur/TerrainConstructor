@@ -2,6 +2,11 @@ project: trc-1
 name: trc-s1
 description: Hyperparameter tune sweep
 program: train.py
+command:
+  - ${env}
+  - python3
+  - ${program}
+  - ${args}
 method: bayes
 metric:
   name: validation_loss
