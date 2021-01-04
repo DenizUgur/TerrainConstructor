@@ -47,8 +47,8 @@ def train():
     net = skip(
         1,
         1,
-        num_channels_down=[IC / 8, IC / 4, IC / 2, IC, IC, IC],
-        num_channels_up=[IC / 8, IC / 4, IC / 2, IC, IC, IC],
+        num_channels_down=[IC // 8, IC // 4, IC // 2, IC, IC, IC],
+        num_channels_up=[IC // 8, IC // 4, IC // 2, IC, IC, IC],
         num_channels_skip=[0, 0, 0, 0, 0, 0],
         filter_size_up=config.filter_size_up,
         filter_size_down=config.filter_size_down,
