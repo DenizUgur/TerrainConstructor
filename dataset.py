@@ -54,6 +54,7 @@ class TerrainDataset(Dataset):
         observer_pad=50,
         block_variance=4,
         observer_height=0.75,
+        limit_samples=None,
         randomize=True,
         random_state=42,
         usable_portion=0.8,
@@ -68,6 +69,7 @@ class TerrainDataset(Dataset):
         observer_pad -> n pixels to pad before getting a random observer
         block_variance -> how many different observer points
         observer_height -> Observer Height
+        limit_samples -> Limit number of samples returned
         randomize -> predictable randomize
         random_state -> a value that gets added to seed
         usable_portion -> What % of the data will be used
@@ -90,6 +92,8 @@ class TerrainDataset(Dataset):
         self.files = glob(dataset_glob)
         self.dataset_type = dataset_type
         self.usable_portion = usable_portion
+        self.limit_samples = limit_samples
+
         self.randomize = False if fast_load else randomize
         self.random_state = random_state
         if self.randomize:
@@ -132,6 +136,9 @@ class TerrainDataset(Dataset):
         self.current_blocks = None
 
     def __len__(self):
+        if not self.limit_samples is None:
+            return self.limit_samples
+
         key = list(self.sample_dict.keys())[-1]
         return self.sample_dict[key]["end"]
 
