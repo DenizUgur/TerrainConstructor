@@ -268,16 +268,16 @@ class TerrainDataset(Dataset):
         else:
             blocks = blocks[int(len(blocks) * self.usable_portion) :]
 
-        if self.randomize:
-            np.random.seed(int(str(abs(hash(file)))[:5]) + self.random_state)
-            np.random.shuffle(blocks)
-
         # * Add Variance
         blocks = np.repeat(blocks, self.block_variance, axis=0)
 
         # * Remove blocks that contain nans
         mask = ~np.isnan(blocks).any(axis=1).any(axis=1)
         blocks = blocks[mask]
+
+        if self.randomize:
+            np.random.seed(int(str(abs(hash(file)))[:5]) + self.random_state)
+            np.random.shuffle(blocks)
 
         if return_mask:
             # * Further filter remeaning data in relation to z-score
