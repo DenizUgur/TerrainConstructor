@@ -131,10 +131,7 @@ class TerrainDataset(Dataset):
         ]
 
         # * Check if limit_samples is enough for this dataset
-        assert (
-            limit_samples > self.get_len(),
-            "limit_samples cannot be bigger than dataset size",
-        )
+        assert limit_samples <= self.get_len(), "limit_samples cannot be bigger than dataset size"
 
         # * Dataset state
         self.current_file = None
