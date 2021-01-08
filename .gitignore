@@ -4,6 +4,7 @@ wandb/
 tmp/
 models/
 utils/
+runs/
 backup/
 .vsls.json
 __pycache__

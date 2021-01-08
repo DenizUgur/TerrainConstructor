@@ -1,6 +1,6 @@
 project: trc-1
-name: trc-s1
-description: Hyperparameter tune sweep
+name: trc-s2
+description: Hyperparameter tune sweep (with SSE)
 program: train.py
 command:
   - ${env}

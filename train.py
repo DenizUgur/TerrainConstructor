@@ -7,24 +7,23 @@ from tqdm import tqdm
 import wandb
 import os
 
-from utils.inpainting_utils import *
-from models.skip import skip
+from unet.unet_model import UNet
 from early_stopping import EarlyStopping
 
 hyperparameter_defaults = dict(
-    batch_size=4,
-    epochs=10,
+    batch_size=1,
+    epochs=300,
     learning_rate=0.001,
-    train_samples=1000,
-    filter_size_up=3,
-    filter_size_down=5,
-    input_channels=128,
+    train_samples=40000,
 )
 wandb.init(config=hyperparameter_defaults, project="trc-1")
 config = wandb.config
 
 
 def train():
+    bypass_ES = True
+    ES = EarlyStopping(patience=10, path="trc-1/model.pt")
+
     # pylint: disable=no-member
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
@@ -40,27 +39,29 @@ def train():
         "data/MDRS/data/*.tif",
         dataset_type="validation",
         randomize=False,
-        limit_samples=config.train_samples // 2,
+        limit_samples=config.train_samples // 4,
     )
     valLoader = DataLoader(dataset=TDS_V, batch_size=config.batch_size, num_workers=0)
 
-    IC = config.input_channels
-    net = skip(
-        1,
-        1,
-        num_channels_down=[IC // 8, IC // 4, IC // 2, IC, IC, IC],
-        num_channels_up=[IC // 8, IC // 4, IC // 2, IC, IC, IC],
-        num_channels_skip=[0, 0, 0, 0, 0, 0],
-        filter_size_up=config.filter_size_up,
-        filter_size_down=config.filter_size_down,
-        filter_skip_size=1,
-        upsample_mode="nearest",  # downsample_mode='avg',
-        need1x1_up=False,
-        need_sigmoid=True,
-        need_bias=True,
-        pad="reflection",
-        act_fun="LeakyReLU",
-    ).to(device)
+    # IC = config.input_channels
+    # SC = config.skip_connection
+    # net = skip(
+    #     1,
+    #     1,
+    #     num_channels_down=[IC // 8, IC // 4, IC // 2, IC, IC, IC],
+    #     num_channels_up=[IC // 8, IC // 4, IC // 2, IC, IC, IC],
+    #     num_channels_skip=[SC, SC, SC, SC, SC, SC],
+    #     filter_size_up=config.filter_size_up,
+    #     filter_size_down=config.filter_size_down,
+    #     filter_skip_size=1,
+    #     upsample_mode="nearest",  # downsample_mode='avg',
+    #     need1x1_up=False,
+    #     need_sigmoid=True,
+    #     need_bias=True,
+    #     pad="reflection",
+    #     act_fun="LeakyReLU",
+    # ).to(device)
+    net = UNet(1, 1).to(device)
     wandb.watch(net)
 
     criterion = nn.MSELoss()
@@ -92,8 +93,6 @@ def train():
     # to track the average validation loss per epoch as the model trains
     avg_valid_losses = []
 
-    ES = EarlyStopping(patience=10)
-
     for epoch in tqdm(range(config.epochs), position=0, disable=not bar):
         ###################
         # train the model #
@@ -103,8 +102,8 @@ def train():
             enumerate(trainLoader), total=len(trainLoader), position=1, disable=not bar
         ):
             # send iteration data to GPU
-            data = data.cuda()
-            target = target.cuda()
+            data = data.to(device)
+            target = target.to(device)
             # clear the gradients of all optimized variables
             optimizer.zero_grad()
             # forward pass: compute predicted outputs by passing inputs to the model
@@ -132,8 +131,8 @@ def train():
             enumerate(valLoader), total=len(valLoader), position=2, disable=not bar
         ):
             # send iteration data to GPU
-            data = data.cuda()
-            target = target.cuda()
+            data = data.to(device)
+            target = target.to(device)
             # forward pass: compute predicted outputs by passing inputs to the model
             output = net(data)
             # calculate the loss
@@ -180,7 +179,7 @@ def train():
         # Check if the training is stale
         ES(valid_loss, net, optimizer)
 
-        if ES.early_stop:
+        if ES.early_stop and not bypass_ES:
             print("Early stopping")
             break
 

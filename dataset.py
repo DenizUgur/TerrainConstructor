@@ -45,6 +45,8 @@ class Helper:
 
 
 class TerrainDataset(Dataset):
+    NAN = 0
+
     def __init__(
         self,
         dataset_glob,
@@ -103,10 +105,7 @@ class TerrainDataset(Dataset):
         self.sample_dict = dict()
         start = 0
         for file in tqdm(self.files, ncols=100, disable=fast_load):
-            if fast_load:
-                blocks, mask = np.load("tmp/blocks.npy"), np.load("tmp/mask.npy")
-            else:
-                blocks, mask = self.get_blocks(file, return_mask=True)
+            blocks, mask = self.get_blocks(file, return_mask=True)
 
             if len(blocks) == 0:
                 continue
@@ -131,16 +130,24 @@ class TerrainDataset(Dataset):
             "range"
         ]
 
+        # * Check if limit_samples is enough for this dataset
+        assert (
+            limit_samples > self.get_len(),
+            "limit_samples cannot be bigger than dataset size",
+        )
+
         # * Dataset state
         self.current_file = None
         self.current_blocks = None
 
+    def get_len(self):
+        key = list(self.sample_dict.keys())[-1]
+        return self.sample_dict[key]["end"]
+
     def __len__(self):
         if not self.limit_samples is None:
             return self.limit_samples
-
-        key = list(self.sample_dict.keys())[-1]
-        return self.sample_dict[key]["end"]
+        return self.get_len()
 
     def __getitem__(self, idx):
         """
@@ -164,7 +171,7 @@ class TerrainDataset(Dataset):
         adjusted = self.get_adjusted(current)
         viewshed, observer = self.viewshed(adjusted, oh, idx)
         mask = np.isnan(viewshed)
-        viewshed[mask] = -10
+        viewshed[mask] = TerrainDataset.NAN
 
         dataTensor = torch.from_numpy(viewshed)
         dataTensor = dataTensor.unsqueeze(0)
@@ -263,6 +270,10 @@ class TerrainDataset(Dataset):
 
         blocks = self.blockshaped(grid, self.patch_size)
 
+        # * Remove blocks that contain nans
+        mask = ~np.isnan(blocks).any(axis=1).any(axis=1)
+        blocks = blocks[mask]
+
         if self.dataset_type == "train":
             blocks = blocks[: int(len(blocks) * self.usable_portion)]
         else:
@@ -270,14 +281,6 @@ class TerrainDataset(Dataset):
 
         # * Add Variance
         blocks = np.repeat(blocks, self.block_variance, axis=0)
-
-        # * Remove blocks that contain nans
-        mask = ~np.isnan(blocks).any(axis=1).any(axis=1)
-        blocks = blocks[mask]
-
-        if self.randomize:
-            np.random.seed(int(str(abs(hash(file)))[:5]) + self.random_state)
-            np.random.shuffle(blocks)
 
         if return_mask:
             # * Further filter remeaning data in relation to z-score
