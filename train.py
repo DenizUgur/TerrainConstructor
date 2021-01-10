@@ -7,14 +7,15 @@ from tqdm import tqdm
 import wandb
 import os
 
-from unet.unet_model import UNet
+# from unet.unet_model import UNet
+from model import UNet
 from early_stopping import EarlyStopping
 
 hyperparameter_defaults = dict(
     batch_size=1,
     epochs=300,
     learning_rate=0.001,
-    train_samples=40000,
+    train_samples=1000,
 )
 wandb.init(config=hyperparameter_defaults, project="trc-1")
 config = wandb.config
@@ -43,25 +44,7 @@ def train():
     )
     valLoader = DataLoader(dataset=TDS_V, batch_size=config.batch_size, num_workers=0)
 
-    # IC = config.input_channels
-    # SC = config.skip_connection
-    # net = skip(
-    #     1,
-    #     1,
-    #     num_channels_down=[IC // 8, IC // 4, IC // 2, IC, IC, IC],
-    #     num_channels_up=[IC // 8, IC // 4, IC // 2, IC, IC, IC],
-    #     num_channels_skip=[SC, SC, SC, SC, SC, SC],
-    #     filter_size_up=config.filter_size_up,
-    #     filter_size_down=config.filter_size_down,
-    #     filter_skip_size=1,
-    #     upsample_mode="nearest",  # downsample_mode='avg',
-    #     need1x1_up=False,
-    #     need_sigmoid=True,
-    #     need_bias=True,
-    #     pad="reflection",
-    #     act_fun="LeakyReLU",
-    # ).to(device)
-    net = UNet(1, 1).to(device)
+    net = UNet(1, 1, depth=5, merge_mode="add").to(device)
     wandb.watch(net)
 
     criterion = nn.MSELoss()
@@ -73,16 +56,6 @@ def train():
 
     # * Training Loop parameters
     bar = False
-
-    # reset = True
-    # model_name = "full"
-    # if os.path.exists("tds-1/{}.pt".format(model_name)):
-    #     if reset:
-    #         os.remove("tds-1/{}.pt".format(model_name))
-    #     else:
-    #         checkpoint = torch.load("tds-1/{}.pt".format(model_name))
-    #         net.load_state_dict(checkpoint["model_state_dict"])
-    #         optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
 
     # to track the training loss as the model trains
     train_losses = []
