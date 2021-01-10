@@ -5,6 +5,7 @@ tmp/
 models/
 utils/
 runs/
+trc-1/
 backup/
 .vsls.json
 __pycache__

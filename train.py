@@ -5,7 +5,6 @@ from torch.utils.data import DataLoader
 import numpy as np
 from tqdm import tqdm
 import wandb
-import os
 
 # from unet.unet_model import UNet
 from model import UNet
@@ -15,15 +14,17 @@ hyperparameter_defaults = dict(
     batch_size=1,
     epochs=300,
     learning_rate=0.001,
-    train_samples=1000,
+    depth=5,
+    merge_mode="add",
+    train_samples=20000,
 )
 wandb.init(config=hyperparameter_defaults, project="trc-1")
 config = wandb.config
 
 
 def train():
-    bypass_ES = True
-    ES = EarlyStopping(patience=10, path="trc-1/model.pt")
+    bypass_ES = False
+    ES = EarlyStopping(patience=20, path=f"trc-1/model-{wandb.run.name}.pt")
 
     # pylint: disable=no-member
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
@@ -44,7 +45,7 @@ def train():
     )
     valLoader = DataLoader(dataset=TDS_V, batch_size=config.batch_size, num_workers=0)
 
-    net = UNet(1, 1, depth=5, merge_mode="add").to(device)
+    net = UNet(1, 1, depth=config.depth, merge_mode=config.merge_mode).to(device)
     wandb.watch(net)
 
     criterion = nn.MSELoss()

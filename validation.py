@@ -9,25 +9,26 @@ from tensorboardX import SummaryWriter
 import os
 
 
-from unet.unet_model import UNet
+from model import UNet
 
 if __name__ == "__main__":
     writer = SummaryWriter()
     TDS_T = TerrainDataset(
         "data/MDRS/data/*.tif",
-        dataset_type="train",
+        dataset_type="validation",
         randomize=False,
         fast_load=True,
         limit_samples=1,
     )
     trainLoader = DataLoader(dataset=TDS_T, batch_size=1, num_workers=0)
 
-    model = UNet(1, 1).cuda()
+    model = UNet(1, 1, depth=5, merge_mode="add").cuda()
     print(model)
     criterion = nn.MSELoss()
 
-    if os.path.exists("trc-1/{}.pt".format("model")):
-        checkpoint = torch.load("trc-1/{}.pt".format("model"))
+    wandb_name = "amber-haze-273"
+    if os.path.exists(f"trc-1/model-{wandb_name}.pt"):
+        checkpoint = torch.load(f"trc-1/model-{wandb_name}.pt")
         model.load_state_dict(checkpoint["model_state_dict"])
 
     (dummy, _), _ = TDS_T[0]
